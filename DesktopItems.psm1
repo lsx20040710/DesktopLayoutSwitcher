@@ -69,7 +69,9 @@ function Write-DIJson([string]$Path, $Value) {
     $bytes = (New-Object Text.UTF8Encoding($true)).GetBytes(($Value | ConvertTo-Json -Depth 30))
     $stream = New-Object IO.FileStream($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
-    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, $null) }
+    # PowerShell binds $null to an empty string for a .NET string parameter.
+    # NullString passes an actual null backup name to File.Replace on both 5.1 and 7.
+    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
     else { [IO.File]::Move($temporary, $Path) }
 }
 

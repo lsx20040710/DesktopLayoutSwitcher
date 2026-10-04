@@ -15,4 +15,4 @@
 - `刷新列表` 只会重新读取显示器信息和已保存配置列表，不会改变当前桌面。
 - 恢复窗口位置时只移动当前已经打开的窗口，不自动启动程序。
 - 桌面开启“自动排列图标”时，Explorer 会重新接管图标位置，恢复效果会被覆盖。
-- 命令行仍可使用：`powershell.exe -ExecutionPolicy Bypass -File D:\DesktopLayoutSwitcher\DesktopLayoutSwitcher.ps1 -Action Save -Profile 工位24寸`。
+- 命令行仍可使用：`powershell.exe -ExecutionPolicy Bypass -File E:\Desktop\Apps\DesktopLayoutSwitcher\DesktopLayoutSwitcher.ps1 -Action Save -Profile 工位24寸`。

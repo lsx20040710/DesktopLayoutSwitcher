@@ -7,8 +7,8 @@
     [ValidatePattern('^[\p{L}\p{N}_ -]+$')]
     [string]$Profile = 'default',
 
-    # 用户数据独立于程序目录，安装和升级不会覆盖已有场景。
-    [string]$ProfileRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DesktopLayoutSwitcher\profiles'),
+    # 指定时优先使用此目录，否则读取安装时选择的数据位置。
+    [string]$ProfileRoot,
 
     # 兼容旧版：只恢复图标和窗口的位置，不切换桌面项目。
     [switch]$PositionOnly
@@ -17,6 +17,37 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-StorageSettingsPath {
+    return Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DesktopLayoutSwitcher\storage.json'
+}
+
+function Get-DefaultProfileRoot {
+    param([string]$PreferencePath = (Get-StorageSettingsPath))
+    if (-not (Test-Path -LiteralPath $PreferencePath)) {
+        return Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DesktopLayoutSwitcher\profiles'
+    }
+    try {
+        $raw = (Get-Content -LiteralPath $PreferencePath -Raw -Encoding UTF8).Trim()
+        if (-not $raw.StartsWith('{') -or -not $raw.EndsWith('}')) { throw '设置必须是 JSON 对象。' }
+        $settings = $raw | ConvertFrom-Json
+        $schema = $settings.PSObject.Properties['SchemaVersion']
+        $location = $settings.PSObject.Properties['ProfileRoot']
+        if ($null -eq $schema -or ($schema.Value -isnot [int] -and $schema.Value -isnot [long]) -or
+            $schema.Value -ne 1 -or $null -eq $location -or $location.Value -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($location.Value)) { throw '配置目录设置格式无效。' }
+        # 排除依赖当前盘符的 \folder 和 D:folder，避免目录随启动方式改变。
+        $normalizedPath = $location.Value.Replace('/', '\')
+        if ($normalizedPath.StartsWith('\\?\') -or $normalizedPath.StartsWith('\\.\')) {
+            throw '配置目录不支持设备路径，请使用普通的盘符或共享目录路径。'
+        }
+        if ($location.Value -notmatch '^[A-Za-z]:[\\/]' -and $location.Value -notmatch '^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$)') {
+            throw '配置目录必须为完整的绝对路径。'
+        }
+        return [IO.Path]::GetFullPath($location.Value)
+    }
+    catch { throw "无法读取配置目录设置：$PreferencePath。请修复该文件或使用其 .bak 备份。$($_.Exception.Message)" }
+}
+
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw '本工具仅支持 Windows 10 / 11。'
 }
@@ -24,9 +55,18 @@ if (-not [Environment]::Is64BitProcess) {
     throw '请使用 64 位 Windows PowerShell 或安装版启动器运行本工具。'
 }
 
+if (-not $PSBoundParameters.ContainsKey('ProfileRoot')) {
+    $ProfileRoot = Get-DefaultProfileRoot
+}
+if ([string]::IsNullOrWhiteSpace($ProfileRoot)) { throw '配置目录不能为空。' }
 $ProfileRoot = [IO.Path]::GetFullPath($ProfileRoot)
 $script:DataRoot = Join-Path $ProfileRoot 'data'
 $script:DesktopPath = [Environment]::GetFolderPath('DesktopDirectory')
+$desktopRoot = [IO.Path]::GetFullPath($script:DesktopPath).TrimEnd('\')
+if ($ProfileRoot.TrimEnd('\').Equals($desktopRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    $ProfileRoot.StartsWith($desktopRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw '配置目录必须位于桌面之外，请在安装向导中选择其他目录。'
+}
 Import-Module (Join-Path $PSScriptRoot 'DesktopItems.psm1') -Force
 
 # 加载 WinForms 和 Drawing，用于读取显示器信息并创建本地小窗口。
@@ -852,13 +892,13 @@ function Get-SharedDesktopNames {
 }
 
 function Get-SharedDesktopArchiveInfo {
-    # 只读取索引和已知存档位置，不进入共有项目内部。
+    # 只读取索引中的历史位置，不进入任何真实文件夹或旧目录备份内部。
     $path = Join-Path $script:DataRoot 'items.json'
     if (-not (Test-Path -LiteralPath $path)) { return }
     $catalog = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
     $shared = @(Get-SharedDesktopNames)
     foreach ($record in @($catalog.Items)) {
-        if ($record.Name -in $shared) {
+        if ($record.Kind -eq 'Directory' -or $record.Name -in $shared) {
             $archive = Join-Path (Join-Path $catalog.VaultRoot $record.Id) 'content'
             if (Test-Path -LiteralPath $archive) { [pscustomobject]@{Name = $record.Name; Path = $archive} }
         }
@@ -869,16 +909,6 @@ function Initialize-LayoutStorage {
     New-Item -ItemType Directory -Path $ProfileRoot -Force | Out-Null
     # 规则损坏时停止，不回退成可能收纳项目的空名单。
     [void]@(Get-ConfiguredSharedDesktopNames)
-    # 直接运行旧项目时自动迁移其位置配置；不复制个人文件或快捷方式。
-    $legacyRoot = Join-Path $PSScriptRoot 'profiles'
-    if ($legacyRoot -ne $ProfileRoot -and (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
-        foreach ($file in @(Get-ChildItem -LiteralPath $legacyRoot -Filter '*.json' -File)) {
-            $target = Join-Path $ProfileRoot $file.Name
-            if (-not (Test-Path -LiteralPath $target)) {
-                Copy-Item -LiteralPath $file.FullName -Destination $target
-            }
-        }
-    }
     Repair-DesktopItemsTransaction -DataRoot $script:DataRoot | Out-Null
 }
 
@@ -888,7 +918,10 @@ function Get-SavedProfileNames {
         return @()
     }
 
-    return @(Get-ChildItem -LiteralPath $ProfileRoot -Filter '*.json' -File | Sort-Object BaseName | ForEach-Object { $_.BaseName })
+    $bootstrap = Get-StorageSettingsPath
+    return @(Get-ChildItem -LiteralPath $ProfileRoot -Filter '*.json' -File |
+        Where-Object { -not $_.FullName.Equals($bootstrap, [StringComparison]::OrdinalIgnoreCase) } |
+        Sort-Object BaseName | ForEach-Object { $_.BaseName })
 }
 
 function Get-ScreenSnapshot {
@@ -974,7 +1007,7 @@ function Save-LayoutProfile {
     Write-LayoutJson -Path $path -Value $snapshot
     Write-Host "已保存布局：$Name -> $path"
     Write-Host "桌面图标：$($snapshot.DesktopIcons.Count) 个；窗口：$($snapshot.Windows.Count) 个。"
-    Write-Host "场景桌面项目：$(@($snapshot.DesktopItems.Items).Count) 个。"
+    Write-Host "场景文件及快捷方式：$(@($snapshot.DesktopItems.Items).Count) 个；真实文件夹仅保存图标位置。"
 }
 
 function Restore-LayoutProfile {
@@ -996,14 +1029,16 @@ function Restore-LayoutProfile {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             $current = @([DesktopLayout.DesktopIconManager]::Capture())
             $currentNames = @($current | ForEach-Object { $_.Text })
-            $missing = @($snapshot.DesktopIcons | Where-Object { $_.Text -notin $currentNames })
+            # 等待本次真正恢复的文件，不等待已被用户删除的目录或额外共有项目。
+            $expectedNames = @($snapshot.DesktopItems.Items | Where-Object { $_.Kind -eq 'File' } | ForEach-Object { $_.Name; [IO.Path]::GetFileNameWithoutExtension($_.Name) })
+            $missing = @($snapshot.DesktopIcons | Where-Object { $_.Text -in $expectedNames -and $_.Text -notin $currentNames })
             if ($missing.Count -eq 0) { break }
             Start-Sleep -Milliseconds 150
         }
         Write-Host ($result | ConvertTo-Json -Compress)
     }
     elseif (-not $hasItems) {
-        Write-Warning '这是旧版位置配置。本次只恢复位置；请重新保存一次，以启用桌面项目补齐与收纳。'
+        Write-Warning '这是旧版位置配置。本次只恢复位置；请重新保存一次，以启用文件及快捷方式的补齐与收纳。'
     }
     [DesktopLayout.DesktopIconManager]::Restore((New-IconList -Items @($snapshot.DesktopIcons)))
     Start-Sleep -Milliseconds 200
@@ -1019,6 +1054,9 @@ function Recover-DesktopItems {
     if ($result.PreservedShared -gt 0) {
         Write-Host "保留名单中的 $($result.PreservedShared) 个历史收纳项目保持原处：$($result.VaultRoot)"
     }
+    if ($result.PreservedDirectory -gt 0) {
+        Write-Host "旧版的 $($result.PreservedDirectory) 个文件夹收纳存档仍保留：$($result.VaultRoot)，不会自动移回桌面。"
+    }
     [DesktopLayout.DesktopIconManager]::NotifyDesktopChanged()
 }
 
@@ -1027,16 +1065,18 @@ function Get-LayoutStatusText {
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add("配置目录：$ProfileRoot")
     $lines.Add("用户桌面：$script:DesktopPath")
-    $lines.Add('切换场景会收纳多余项目、补齐缺少项目；取回收纳项目可恢复普通项目。')
-    $lines.Add('修改场景后请保存；公共桌面项目、系统图标和工具入口为所有场景共有。')
+    $lines.Add('只切换文件与快捷方式；真实文件夹仅恢复图标位置，增删直接忽略。')
+    $lines.Add('不读取或备份文件夹内容；公共桌面项目、系统图标和工具入口为所有场景共有。')
+    $lines.Add("安装时可选择配置目录；旧数据不会随目录选择自动迁移。")
     $configured = @(Get-ConfiguredSharedDesktopNames)
     $sharedText = if ($configured.Count -gt 0) { $configured -join '、' } else { '无（工具入口仍自动保留）' }
-    $lines.Add("始终保留在桌面：$sharedText。内容保持原处，仅恢复图标位置。")
+    $lines.Add("额外保留名单：$sharedText。所有真实文件夹均固定保留，不需要勾选。")
     $archives = @(Get-SharedDesktopArchiveInfo)
-    if ($archives.Count -gt 0) { $lines.Add("保留名单中的历史收纳项目：$($archives.Count) 个，保持原处，不会自动取回。") }
+    if ($archives.Count -gt 0) { $lines.Add("保留的历史目录或共有收纳项目：$($archives.Count) 个，不会自动取回。") }
     foreach ($archive in $archives) {
         $lines.Add("保留的历史收纳项目：$($archive.Name)；位置：$($archive.Path)")
     }
+    $lines.Add("备份目录：$(Join-Path $script:DataRoot 'backup')；旧版已复制的目录备份保留，不会自动删除。")
     $lines.Add('')
     $lines.Add("当前显示器：")
 
@@ -1072,9 +1112,11 @@ function Show-SharedDesktopSettings {
     param([System.Windows.Forms.Form]$Owner)
     $configured = @(Get-ConfiguredSharedDesktopNames)
     $automatic = @(Get-AutomaticSharedDesktopNames) + @('desktop.ini')
-    # 只枚举桌面第一层；列表项可包含 pnpm/云文件，但不会进入其内容。
-    $available = @($configured + @(Get-ChildItem -LiteralPath $script:DesktopPath -Force | ForEach-Object { $_.Name }))
-    $available = @(ConvertTo-SharedDesktopNames -Names $available | Where-Object { $_ -notin $automatic })
+    # 所有真实文件夹固定只恢复位置；这里只允许选择额外保留的文件或快捷方式。
+    $entries = @(Get-ChildItem -LiteralPath $script:DesktopPath -Force)
+    $directoryNames = @($entries | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.Name })
+    $available = @($configured + @($entries | Where-Object { -not $_.PSIsContainer } | ForEach-Object { $_.Name }))
+    $available = @(ConvertTo-SharedDesktopNames -Names $available | Where-Object { $_ -notin $automatic -and $_ -notin $directoryNames })
     $dialog = [System.Windows.Forms.Form]::new()
     try {
         $dialog.Text = '始终保留在桌面'
@@ -1086,7 +1128,7 @@ function Show-SharedDesktopSettings {
         $dialog.Font = $Owner.Font
 
         $description = [System.Windows.Forms.Label]::new()
-        $description.Text = "勾选的项目在所有场景中保持原处，仍可恢复图标位置。`r`n文件夹内容不会被扫描、备份或收纳；Apps 默认勾选。`r`n工具入口和正在运行的程序目录会自动保留。"
+        $description.Text = "这里选择额外保留的文件与快捷方式，仍可恢复图标位置。`r`n所有真实文件夹只恢复图标位置，增删直接忽略。`r`n文件夹不扫描、不备份、不收纳；工具入口自动保留。"
         $description.Location = [System.Drawing.Point]::new(16, 12)
         $description.Size = [System.Drawing.Size]::new(508, 66)
         $dialog.Controls.Add($description)
@@ -1152,7 +1194,7 @@ function Show-LayoutToolWindow {
     $form.Controls.Add($title)
 
     $hint = [System.Windows.Forms.Label]::new()
-    $hint.Text = "每个场景分别记住项目和位置。整理后保存；切换时自动补齐和收纳。`r`n修改场景后请再次保存；旧配置重新保存一次后启用新功能。"
+    $hint.Text = "保存图标和窗口位置；切换场景时补齐、收纳文件与快捷方式。`r`n所有真实文件夹仅恢复位置，增删忽略，不扫描或备份内部内容。"
     $hint.AutoSize = $true
     $hint.Location = [System.Drawing.Point]::new(20, 52)
     $form.Controls.Add($hint)
@@ -1245,7 +1287,7 @@ function Show-LayoutToolWindow {
     $recoverButton.Size = [System.Drawing.Size]::new(140, 30)
     $recoverButton.Anchor = 'Bottom,Right'
     $form.Controls.Add($recoverButton)
-    $toolTip.SetToolTip($recoverButton, '取回普通收纳项目；保留名单中的历史存档保持原处，路径显示在状态栏。同名冲突会提示。')
+    $toolTip.SetToolTip($recoverButton, '取回文件与快捷方式；旧目录和共有存档仍保留，路径显示在状态栏。同名冲突会提示。')
 
     $sharedButton = [System.Windows.Forms.Button]::new()
     $sharedButton.Text = '始终保留在桌面'
@@ -1253,7 +1295,7 @@ function Show-LayoutToolWindow {
     $sharedButton.Size = [System.Drawing.Size]::new(150, 30)
     $sharedButton.Anchor = 'Bottom,Left'
     $form.Controls.Add($sharedButton)
-    $toolTip.SetToolTip($sharedButton, '选择跨场景保留在原处的项目。Apps 默认保留，其内部内容不会被扫描或移动。')
+    $toolTip.SetToolTip($sharedButton, '选择额外保留在原处的文件与快捷方式；所有真实文件夹均自动只恢复位置。')
 
     $exitButton = [System.Windows.Forms.Button]::new()
     $exitButton.Text = '退出'

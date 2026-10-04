@@ -46,35 +46,53 @@ function New-TestJunction([string]$Path, [string]$Target) {
     [void]$junctions.Add($Path)
 }
 
-function Invoke-WithoutSharedReads([string[]]$SharedPath, [scriptblock]$Action) {
+function Invoke-WithoutDirectoryReads([string[]]$ProtectedPaths, [scriptblock]$Action) {
     # Guard both root identity reads and recursive fingerprints, even when the
-    # shared directory is ordinary and opening its root would otherwise succeed.
+    # directory is ordinary and opening its root would otherwise succeed.
     & $module {
         param($ProtectedPath)
-        $script:SharedTestPaths = @($ProtectedPath)
-        $script:SharedTestIdentity = ${function:Get-DIIdentity}
-        $script:SharedTestFingerprint = ${function:Get-DIFingerprint}
+        $script:DirectoryTestPaths = @($ProtectedPath)
+        $script:DirectoryTestIdentity = ${function:Get-DIIdentity}
+        $script:DirectoryTestFingerprint = ${function:Get-DIFingerprint}
         function script:Get-DIIdentity($Item) {
-            foreach ($protected in $script:SharedTestPaths) {
-                if (Test-DIInside $Item.FullName $protected) { throw '共享目录不应被扫描文件身份。' }
+            foreach ($protected in $script:DirectoryTestPaths) {
+                if (Test-DIInside $Item.FullName $protected) { throw '目录不应被扫描文件身份。' }
             }
-            return & $script:SharedTestIdentity $Item
+            return & $script:DirectoryTestIdentity $Item
         }
         function script:Get-DIFingerprint([string]$Path) {
-            foreach ($protected in $script:SharedTestPaths) {
-                if (Test-DIInside $Path $protected) { throw '共享目录不应被扫描内容指纹。' }
+            foreach ($protected in $script:DirectoryTestPaths) {
+                if (Test-DIInside $Path $protected) { throw '目录不应被扫描内容指纹。' }
             }
-            return & $script:SharedTestFingerprint $Path
+            return & $script:DirectoryTestFingerprint $Path
         }
-    } $SharedPath
+    } $ProtectedPaths
     try { return & $Action }
     finally {
         & $module {
-            Set-Item -Path Function:script:Get-DIIdentity -Value $script:SharedTestIdentity
-            Set-Item -Path Function:script:Get-DIFingerprint -Value $script:SharedTestFingerprint
-            Remove-Variable -Scope Script -Name SharedTestPaths, SharedTestIdentity, SharedTestFingerprint
+            Set-Item -Path Function:script:Get-DIIdentity -Value $script:DirectoryTestIdentity
+            Set-Item -Path Function:script:Get-DIFingerprint -Value $script:DirectoryTestFingerprint
+            Remove-Variable -Scope Script -Name DirectoryTestPaths, DirectoryTestIdentity, DirectoryTestFingerprint
         }
     }
+}
+
+
+function New-LegacyDirectory($Area, [string]$Name) {
+    return & $module {
+        param($DesktopPath, $DataRoot, $Name)
+        $state = Get-DIState $DesktopPath $DataRoot
+        $record = [pscustomobject]@{Id=[guid]::NewGuid().ToString('N'); Name=$Name; Kind='Directory'; Identity='legacy-directory-identity'; BackupVersion=[guid]::NewGuid().ToString('N'); Fingerprint='legacy-directory-fingerprint'}
+        $backup = Get-DIBackupPath $state $record
+        $vault = Get-DIVaultPath $state $record.Id
+        [IO.Directory]::CreateDirectory($backup) | Out-Null
+        [IO.Directory]::CreateDirectory($vault) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $backup 'backup.txt'), 'original directory backup')
+        [IO.File]::WriteAllText((Join-Path $vault 'archive.txt'), 'original directory archive')
+        $state.Catalog.Items = @($state.Catalog.Items) + @($record)
+        Write-DIJson $state.CatalogPath $state.Catalog
+        return [pscustomobject]@{Record=$record; Backup=$backup; Vault=$vault; SnapshotItem=[pscustomobject]@{Id=$record.Id; Name=$Name; Kind='Directory'}}
+    } $Area.Desktop $Area.Data $Name
 }
 
 try {
@@ -93,14 +111,14 @@ try {
     Write-Text (Join-Path $folder '结果.txt') 'first result'
     Write-Text (Join-Path $folder '将删除.txt') 'obsolete result'
     $big = Save-DesktopItemsSnapshot -DesktopPath $area.Desktop -DataRoot $area.Data -SharedNames $shared
-    Assert-Equal 3 $big.Items.Count '大屏集合包含快捷方式、URL 和文件夹'
+    Assert-Equal 2 $big.Items.Count '场景集合仅包含普通文件，目录只由主界面记住位置'
     $result = Restore-DesktopItemsSnapshot -DesktopPath $area.Desktop -DataRoot $area.Data -Snapshot $small -SharedNames $shared
-    Assert-Equal 2 $result.Stashed '小屏收纳多余两个项目'
-    Assert-True (-not (Test-Path -LiteralPath $folder)) '目录已离开桌面'
+    Assert-Equal 1 $result.Stashed '小屏仅收纳多余文件'
+    Assert-True (Test-Path -LiteralPath $folder) '普通目录始终留在桌面'
     Assert-True (Test-Path -LiteralPath (Join-Path $area.Desktop 'desktop.ini')) '保留 desktop.ini'
     Assert-True (Test-Path -LiteralPath (Join-Path $area.Desktop 'DesktopLayoutSwitcher.lnk')) '保留工具入口'
     $result = Restore-DesktopItemsSnapshot -DesktopPath $area.Desktop -DataRoot $area.Data -Snapshot $big -SharedNames $shared
-    Assert-Equal 2 $result.Restored '大屏补齐两个项目'
+    Assert-Equal 1 $result.Restored '大屏仅补齐缺失文件'
     Assert-Equal 'url bytes' (Read-Text $extra) '快捷方式文件内容保持完整'
     Assert-Equal 'first result' (Read-Text (Join-Path $folder '结果.txt')) '目录内容保持完整'
     Assert-True (Test-Path -LiteralPath (Join-Path $folder '空目录')) '空目录保持完整'
@@ -148,7 +166,8 @@ try {
     Restore-DesktopItemsSnapshot -DesktopPath $area.Desktop -DataRoot $area.Data -Snapshot $emptySnapshot -SharedNames $shared | Out-Null
     [IO.Directory]::CreateDirectory($common) | Out-Null
     Write-Text (Join-Path $common 'collision.txt') 'keep collision directory'
-    Assert-Throws { Restore-DesktopItemsSnapshot -DesktopPath $area.Desktop -DataRoot $area.Data -Snapshot $small -SharedNames $shared } '同名.*冲突' '文件和目录同名时拒绝覆盖'
+    $folderCollisionResult = Invoke-WithoutDirectoryReads $common { Restore-DesktopItemsSnapshot -DesktopPath $area.Desktop -DataRoot $area.Data -Snapshot $small -SharedNames $shared }
+    Assert-Equal 1 $folderCollisionResult.PreservedDirectory '旧文件名称现在是目录时安全跳过'
     Assert-Equal 'keep collision directory' (Read-Text (Join-Path $common 'collision.txt')) '同名目录仍保持完整'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $area.Data 'transaction.json'))) '预检冲突不留下半次切换'
 
@@ -242,160 +261,204 @@ try {
     Assert-Throws { Restore-DesktopItemsSnapshot -DesktopPath $crash.Desktop -DataRoot $crash.Data -Snapshot $malformed } '无效.*名称' '拒绝路径穿越场景'
     Assert-Throws { Restore-DesktopItemsSnapshot -DesktopPath $crash.Desktop -DataRoot $crash.Data -Snapshot ([pscustomobject]@{Version=1; Items=@()}) } 'Version=2' '旧版本集合不会修改桌面'
 
-    # A scene saved before exclusions still contains Apps. Applying the global
-    # list must leave it intact while restoring/stashing all ordinary entries.
-    $legacyShared = New-Area 'legacy-shared-scene'
-    $legacyApps = Join-Path $legacyShared.Desktop 'Apps'
-    $projectModules = Join-Path (Join-Path $legacyApps 'diet-tracker') 'node_modules'
-    [IO.Directory]::CreateDirectory($projectModules) | Out-Null
-    Write-Text (Join-Path $legacyApps 'project.txt') 'original project'
-    $legacyCommon = Join-Path $legacyShared.Desktop 'common.lnk'
-    Write-Text $legacyCommon 'original shortcut'
-    $legacyScene = Save-DesktopItemsSnapshot -DesktopPath $legacyShared.Desktop -DataRoot $legacyShared.Data
+    # Real directories are excluded without requiring SharedNames. Legacy
+    # snapshots/catalogs/backup/vault are handcrafted because new saves never
+    # create directory entries or directory backups.
+    $directories = New-Area 'all-directories-position-only'
+    $apps = Join-Path $directories.Desktop 'Apps'
+    $plainFolder = Join-Path $directories.Desktop 'Research'
+    [IO.Directory]::CreateDirectory((Join-Path $apps 'diet-tracker/node_modules')) | Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $plainFolder 'Empty')) | Out-Null
+    Write-Text (Join-Path $apps 'project.txt') 'untouched project'
+    Write-Text (Join-Path $plainFolder 'result.txt') 'untouched research'
+    Write-Text (Join-Path $directories.Desktop 'regular.txt') 'ordinary file'
+    $filesOnly = Invoke-WithoutDirectoryReads @($apps, $plainFolder) {
+        Save-DesktopItemsSnapshot -DesktopPath $directories.Desktop -DataRoot $directories.Data
+    }
+    Assert-Equal 1 $filesOnly.Items.Count '不设共有名单也仅捕获桌面文件'
+    $newCatalog = Read-Text (Join-Path $directories.Data 'items.json') | ConvertFrom-Json
+    Assert-Equal 0 @($newCatalog.Items | Where-Object Kind -eq 'Directory').Count '新索引没有任何目录记录'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath (Join-Path $directories.Data 'backup') -Directory).Count '新备份仅属于普通文件'
+    $onlyFilesEmpty = Invoke-WithoutDirectoryReads @($apps, $plainFolder) {
+        Restore-DesktopItemsSnapshot -DesktopPath $directories.Desktop -DataRoot $directories.Data -Snapshot $emptySnapshot
+    }
+    Assert-Equal 1 $onlyFilesEmpty.Stashed '空场景仅收纳普通文件'
+    Assert-Equal 'untouched project' (Read-Text (Join-Path $apps 'project.txt')) '空场景不移动或修改 Apps'
+    Assert-True (Test-Path -LiteralPath (Join-Path $plainFolder 'Empty')) '普通空目录保持原处'
+    $newFolder = Join-Path $directories.Desktop 'AddedAfterSave'
+    [IO.Directory]::CreateDirectory($newFolder) | Out-Null
+    Write-Text (Join-Path $newFolder 'added.txt') 'new directory remains'
+    [IO.Directory]::Delete($plainFolder, $true)
+    Invoke-WithoutDirectoryReads @($apps, $newFolder) {
+        Restore-DesktopItemsSnapshot -DesktopPath $directories.Desktop -DataRoot $directories.Data -Snapshot $filesOnly
+    } | Out-Null
+    Assert-Equal 'new directory remains' (Read-Text (Join-Path $newFolder 'added.txt')) '切换忽略后来新增的目录'
+    Assert-True (-not (Test-Path -LiteralPath $plainFolder)) '切换不会补齐手动删除的目录'
+
+    $legacy = New-Area 'legacy-directory-archive'
+    $legacyApps = Join-Path $legacy.Desktop 'Apps'
+    [IO.Directory]::CreateDirectory($legacyApps) | Out-Null
+    Write-Text (Join-Path $legacyApps 'current.txt') 'latest current directory'
+    $legacyFile = Join-Path $legacy.Desktop 'common.lnk'
+    Write-Text $legacyFile 'original shortcut'
+    $legacyFileScene = Save-DesktopItemsSnapshot -DesktopPath $legacy.Desktop -DataRoot $legacy.Data
+    $legacyDirectory = New-LegacyDirectory $legacy 'Apps'
+    $legacyScene = [pscustomobject]@{Version=2; Items=@($legacyFileScene.Items) + @($legacyDirectory.SnapshotItem)}
     $legacySceneJson = $legacyScene | ConvertTo-Json -Depth 30
-    $beforeCatalog = Read-Text (Join-Path $legacyShared.Data 'items.json') | ConvertFrom-Json
-    $beforeApps = @($beforeCatalog.Items | Where-Object Name -eq 'Apps')[0]
-    $oldAppsBackup = Join-Path (Join-Path (Join-Path (Join-Path $legacyShared.Data 'backup') $beforeApps.Id) $beforeApps.BackupVersion) 'content'
-    Write-Text (Join-Path $legacyApps 'project.txt') 'latest project, keep on desktop'
-    if ($env:OS -eq 'Windows_NT') {
-        $legacyOutside = Join-Path $root 'legacy-pnpm-outside'
-        [IO.Directory]::CreateDirectory($legacyOutside) | Out-Null
-        Write-Text (Join-Path $legacyOutside 'sentinel.txt') 'pnpm target must remain untouched'
-        $legacyLink = Join-Path $projectModules '@babel\helper-validator-identifier'
-        New-TestJunction $legacyLink $legacyOutside
+    $legacyDirectoryJson = $legacyDirectory.Record | ConvertTo-Json -Depth 30
+    [IO.File]::Delete($legacyFile)
+    Write-Text (Join-Path $legacy.Desktop 'other.txt') 'ordinary extra file'
+    $legacyResult = Invoke-WithoutDirectoryReads @($legacyApps, $legacyDirectory.Backup, $legacyDirectory.Vault) {
+        Restore-DesktopItemsSnapshot -DesktopPath $legacy.Desktop -DataRoot $legacy.Data -Snapshot $legacyScene
     }
-    [IO.File]::Delete($legacyCommon)
-    Write-Text (Join-Path $legacyShared.Desktop 'other.txt') 'stash this ordinary file'
-    $legacyResult = Invoke-WithoutSharedReads @($legacyApps, $oldAppsBackup) {
-        Restore-DesktopItemsSnapshot -DesktopPath $legacyShared.Desktop -DataRoot $legacyShared.Data -Snapshot $legacyScene -SharedNames @('aPpS')
+    Assert-Equal 1 $legacyResult.PreservedDirectory '旧场景目录条目在运行时忽略'
+    Assert-Equal 1 $legacyResult.Restored '忽略目录后旧场景普通文件仍补齐'
+    Assert-Equal 1 $legacyResult.Stashed '忽略目录后普通多余文件仍收纳'
+    Assert-Equal 'latest current directory' (Read-Text (Join-Path $legacyApps 'current.txt')) '旧目录快照不覆盖当前目录内容'
+    Assert-Equal $legacySceneJson ($legacyScene | ConvertTo-Json -Depth 30) '不改写旧 Version=2 场景对象'
+    $legacyCatalog = Read-Text (Join-Path $legacy.Data 'items.json') | ConvertFrom-Json
+    $legacyAfter = @($legacyCatalog.Items | Where-Object Id -eq $legacyDirectory.Record.Id)[0]
+    Assert-Equal $legacyDirectoryJson ($legacyAfter | ConvertTo-Json -Depth 30) '旧目录索引元数据完全保持'
+    Assert-Equal 'original directory backup' (Read-Text (Join-Path $legacyDirectory.Backup 'backup.txt')) '旧目录备份保留原内容'
+    Assert-Equal 'original directory archive' (Read-Text (Join-Path $legacyDirectory.Vault 'archive.txt')) '旧目录档案留在原 canonical vault'
+    $renamedFolder = Join-Path $legacy.Desktop 'RenamedProject'
+    [IO.Directory]::Move($legacyApps, $renamedFolder)
+    Invoke-WithoutDirectoryReads @($renamedFolder, $legacyDirectory.Backup, $legacyDirectory.Vault) {
+        Restore-DesktopItemsSnapshot -DesktopPath $legacy.Desktop -DataRoot $legacy.Data -Snapshot $legacyScene
+    } | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $legacyApps)) '旧目录名缺失时不从档案或备份补齐'
+    Assert-Equal 'latest current directory' (Read-Text (Join-Path $renamedFolder 'current.txt')) '目录重命名后仍忽略内容和位置以外操作'
+    $directoryIdAsFile = [pscustomobject]@{Version=2; Items=@([pscustomobject]@{Id=$legacyDirectory.Record.Id; Name='historical-file.txt'; Kind='File'})}
+    $badKindResult = Invoke-WithoutDirectoryReads @($renamedFolder, $legacyDirectory.Backup, $legacyDirectory.Vault) {
+        Restore-DesktopItemsSnapshot -DesktopPath $legacy.Desktop -DataRoot $legacy.Data -Snapshot $directoryIdAsFile
     }
-    Assert-Equal 1 $legacyResult.PreservedShared '旧快照共有条目按名称忽略大小写安全跳过'
-    Assert-Equal 1 $legacyResult.Restored '跳过旧 Apps 后其他缺失快捷方式仍补齐'
-    Assert-Equal 1 $legacyResult.Stashed '跳过旧 Apps 后其他多余文件仍收纳'
-    Assert-Equal 'original shortcut' (Read-Text $legacyCommon) '旧场景普通快捷方式正常恢复'
-    Assert-Equal 'latest project, keep on desktop' (Read-Text (Join-Path $legacyApps 'project.txt')) '旧场景不把 Apps 恢复成旧内容'
-    Assert-Equal $legacySceneJson ($legacyScene | ConvertTo-Json -Depth 30) '运行时过滤不改写旧场景'
-    $afterCatalog = Read-Text (Join-Path $legacyShared.Data 'items.json') | ConvertFrom-Json
-    $afterApps = @($afterCatalog.Items | Where-Object Id -eq $beforeApps.Id)[0]
-    Assert-Equal $beforeApps.Identity $afterApps.Identity '共有项目旧索引身份保持不变'
-    Assert-Equal $beforeApps.BackupVersion $afterApps.BackupVersion '共有项目不创建新备份'
-    Assert-Equal $beforeApps.Fingerprint $afterApps.Fingerprint '共有项目不更新内容指纹'
-    Assert-Equal 'original project' (Read-Text (Join-Path $oldAppsBackup 'project.txt')) '已有共有项目备份保持原内容'
-    $sharedCurrent = Invoke-WithoutSharedReads @($legacyApps, $oldAppsBackup) {
-        Save-DesktopItemsSnapshot -DesktopPath $legacyShared.Desktop -DataRoot $legacyShared.Data -SharedNames @('APPS')
+    Assert-Equal 1 $badKindResult.PreservedDirectory '旧目录 ID 被标记为文件时也跳过'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $legacy.Desktop 'historical-file.txt'))) '不通过伪装文件条目取回旧目录'
+    $allFilesResult = Invoke-WithoutDirectoryReads @($renamedFolder, $legacyDirectory.Backup, $legacyDirectory.Vault) {
+        Restore-AllDesktopItems -DesktopPath $legacy.Desktop -DataRoot $legacy.Data
     }
-    Assert-Equal 1 $sharedCurrent.Items.Count '新保存仅记录普通桌面项目'
-    Assert-Equal 0 @($sharedCurrent.Items | Where-Object Name -eq 'Apps').Count '新快照排除 Apps'
-    $emptySharedResult = Invoke-WithoutSharedReads @($legacyApps, $oldAppsBackup) {
-        Restore-DesktopItemsSnapshot -DesktopPath $legacyShared.Desktop -DataRoot $legacyShared.Data -Snapshot $emptySnapshot -SharedNames @('apps')
+    Assert-Equal 1 $allFilesResult.PreservedDirectory '取回操作汇报保留的旧目录档案'
+    Assert-Equal 2 $allFilesResult.Restored '取回操作只恢复普通文件档案'
+    Assert-True (-not (Test-Path -LiteralPath $legacyApps)) '取回操作不会恢复旧目录'
+    Assert-Equal 'original directory archive' (Read-Text (Join-Path $legacyDirectory.Vault 'archive.txt')) '取回后旧目录档案仍留原处'
+    Write-Text $legacyApps 'new independent file with old directory name'
+    $independentFileScene = Invoke-WithoutDirectoryReads @($renamedFolder, $legacyDirectory.Backup, $legacyDirectory.Vault) {
+        Save-DesktopItemsSnapshot -DesktopPath $legacy.Desktop -DataRoot $legacy.Data
     }
-    Assert-Equal 1 $emptySharedResult.Stashed '空场景仅收纳普通项目'
-    Assert-True (Test-Path -LiteralPath $legacyApps) '空场景不会收纳 Apps'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $afterCatalog.VaultRoot $beforeApps.Id) 'content'))) 'Apps 未进入收纳库'
-    if ($env:OS -eq 'Windows_NT') {
-        Assert-True (([IO.File]::GetAttributes($legacyLink) -band [IO.FileAttributes]::ReparsePoint) -ne 0) '旧场景中的 pnpm 联接保持原位置'
-        Assert-Equal 'pnpm target must remain untouched' (Read-Text (Join-Path $legacyOutside 'sentinel.txt')) '旧场景共享目录的外部目标保持完整'
-    }
+    $independentFile = @($independentFileScene.Items | Where-Object Name -eq 'Apps')[0]
+    Assert-True ($independentFile.Id -ne $legacyDirectory.Record.Id) '旧目录名称的新文件有独立身份'
+    Invoke-WithoutDirectoryReads @($renamedFolder, $legacyDirectory.Backup, $legacyDirectory.Vault) {
+        Restore-DesktopItemsSnapshot -DesktopPath $legacy.Desktop -DataRoot $legacy.Data -Snapshot $independentFileScene
+    } | Out-Null
+    Assert-Equal 'new independent file with old directory name' (Read-Text $legacyApps) '旧目录索引不会干扰同名新文件的场景'
 
-    # An Apps copy archived by an older version stays archived, even when a
-    # different Apps folder now exists on the desktop. Other archives still return.
-    $sharedVault = New-Area 'shared-vault'
-    $vaultApps = Join-Path $sharedVault.Desktop 'Apps'
-    [IO.Directory]::CreateDirectory($vaultApps) | Out-Null
-    Write-Text (Join-Path $vaultApps 'original.txt') 'archived Apps version'
-    Write-Text (Join-Path $sharedVault.Desktop 'return.txt') 'return ordinary file'
-    $vaultScene = Save-DesktopItemsSnapshot -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data
-    Restore-DesktopItemsSnapshot -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data -Snapshot $emptySnapshot | Out-Null
-    $vaultCatalog = Read-Text (Join-Path $sharedVault.Data 'items.json') | ConvertFrom-Json
-    $vaultAppsRecord = @($vaultCatalog.Items | Where-Object Name -eq 'Apps')[0]
-    $canonicalVaultApps = Join-Path (Join-Path $vaultCatalog.VaultRoot $vaultAppsRecord.Id) 'content'
-    $vaultAppsBackup = Join-Path (Join-Path (Join-Path (Join-Path $sharedVault.Data 'backup') $vaultAppsRecord.Id) $vaultAppsRecord.BackupVersion) 'content'
-    [IO.Directory]::CreateDirectory($vaultApps) | Out-Null
-    Write-Text (Join-Path $vaultApps 'current.txt') 'current Apps version'
-    $restoreAllResult = Invoke-WithoutSharedReads @($vaultApps, $canonicalVaultApps, $vaultAppsBackup) {
-        Restore-AllDesktopItems -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data -SharedNames @('apps')
+    # A historical file target that is now a real directory is ignored silently.
+    # Other archived files still return and no identity read opens that directory.
+    $shadow = New-Area 'file-target-now-directory'
+    $shadowPath = Join-Path $shadow.Desktop 'old-file.txt'
+    Write-Text $shadowPath 'old file bytes'
+    $shadowScene = Save-DesktopItemsSnapshot -DesktopPath $shadow.Desktop -DataRoot $shadow.Data
+    Restore-DesktopItemsSnapshot -DesktopPath $shadow.Desktop -DataRoot $shadow.Data -Snapshot $emptySnapshot | Out-Null
+    [IO.Directory]::CreateDirectory($shadowPath) | Out-Null
+    Write-Text (Join-Path $shadowPath 'keep.txt') 'new directory contents'
+    $caseShadow = $shadowScene | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+    $caseShadow.Items[0].Name = 'OLD-FILE.TXT'
+    $shadowResult = Invoke-WithoutDirectoryReads $shadowPath {
+        Restore-DesktopItemsSnapshot -DesktopPath $shadow.Desktop -DataRoot $shadow.Data -Snapshot $caseShadow
     }
-    Assert-Equal 1 $restoreAllResult.PreservedShared '取回收纳项目汇报保留的共有档案条数'
-    Assert-Equal 1 $restoreAllResult.Restored '取回收纳项目仍恢复其他档案'
-    Assert-Equal 'return ordinary file' (Read-Text (Join-Path $sharedVault.Desktop 'return.txt')) '普通收纳文件完整取回'
-    Assert-Equal 'current Apps version' (Read-Text (Join-Path $vaultApps 'current.txt')) '取回操作保留现有 Apps'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $vaultApps 'original.txt'))) '不补齐或合并已有 Apps 的旧内容'
-    Assert-Equal 'archived Apps version' (Read-Text (Join-Path $canonicalVaultApps 'original.txt')) '共有档案仍保留在原 canonical vault 路径'
-    Assert-Equal 'archived Apps version' (Read-Text (Join-Path $vaultAppsBackup 'original.txt')) '共有档案旧备份保持完整'
-    $vaultCatalogAfter = Read-Text (Join-Path $sharedVault.Data 'items.json') | ConvertFrom-Json
-    $vaultAppsAfter = @($vaultCatalogAfter.Items | Where-Object Id -eq $vaultAppsRecord.Id)[0]
-    Assert-Equal $vaultAppsRecord.Identity $vaultAppsAfter.Identity '未取回共有档案的索引身份不变'
-    Assert-Equal $vaultAppsRecord.BackupVersion $vaultAppsAfter.BackupVersion '未取回共有档案的备份版本不变'
-    [IO.Directory]::Delete($vaultApps, $true)
-    $skipMissingShared = Restore-DesktopItemsSnapshot -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data -Snapshot $vaultScene -SharedNames @('APPS')
-    Assert-Equal 1 $skipMissingShared.PreservedShared '旧场景中的缺失共有项目也跳过'
-    Assert-True (-not (Test-Path -LiteralPath $vaultApps)) '共有项目缺失时不自动补齐'
-    Assert-Equal 'archived Apps version' (Read-Text (Join-Path $canonicalVaultApps 'original.txt')) '跳过缺失共有项目后其收纳副本仍完整'
-    $historicalAliasScene = $vaultScene | ConvertTo-Json -Depth 30 | ConvertFrom-Json
-    @($historicalAliasScene.Items | Where-Object Name -eq 'Apps')[0].Name = 'FormerApps'
-    $aliasResult = Restore-DesktopItemsSnapshot -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data -Snapshot $historicalAliasScene -SharedNames @('Apps')
-    Assert-Equal 1 $aliasResult.PreservedShared '旧场景使用曾用名称时仍按共有档案身份保护'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $sharedVault.Desktop 'FormerApps'))) '共有档案不会通过旧名称被取回'
-    $aliasCatalog = Read-Text (Join-Path $sharedVault.Data 'items.json') | ConvertFrom-Json
-    Assert-Equal 'Apps' (@($aliasCatalog.Items | Where-Object Id -eq $vaultAppsRecord.Id)[0].Name) '跳过旧名称后共有索引名称不变'
-    Assert-Throws { Save-DesktopItemsSnapshot -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data -SharedNames @('..\Apps') } '无效.*名称' '共有名单不能接受路径穿越名称'
-    Assert-Throws { Restore-DesktopItemsSnapshot -DesktopPath $sharedVault.Desktop -DataRoot $sharedVault.Data -Snapshot $malformed -SharedNames @('Apps') } '无效.*名称' '过滤共有项目时仍拒绝非法场景路径'
+    Assert-Equal 1 $shadowResult.PreservedDirectory '文件目标与目录名称冲突忽略大小写并跳过'
+    Assert-Equal 0 $shadowResult.Restored '当前目录不会被历史文件替换'
+    Write-Text (Join-Path $shadow.Desktop 'extra.txt') 'extra file still managed'
+    Invoke-WithoutDirectoryReads $shadowPath {
+        Restore-DesktopItemsSnapshot -DesktopPath $shadow.Desktop -DataRoot $shadow.Data -Snapshot $emptySnapshot
+    } | Out-Null
+    $shadowAll = Invoke-WithoutDirectoryReads $shadowPath {
+        Restore-AllDesktopItems -DesktopPath $shadow.Desktop -DataRoot $shadow.Data
+    }
+    Assert-Equal 1 $shadowAll.PreservedDirectory '取回档案也跳过当前目录名称冲突'
+    Assert-Equal 1 $shadowAll.Restored '目录名称冲突不阻断其他文件取回'
+    Assert-Equal 'new directory contents' (Read-Text (Join-Path $shadowPath 'keep.txt')) '当前目录内容始终保留'
+    $shadowCatalog = Read-Text (Join-Path $shadow.Data 'items.json') | ConvertFrom-Json
+    $shadowVault = Join-Path (Join-Path $shadowCatalog.VaultRoot $shadowScene.Items[0].Id) 'content'
+    Assert-Equal 'old file bytes' (Read-Text $shadowVault) '历史同名文件仍留收纳库'
+
+    # Complete a pending old-version directory transaction once. The rollback
+    # exception restores original paths; it never creates a new folder operation.
+    $oldCrash = New-Area 'old-directory-transaction'
+    $oldDirectory = New-LegacyDirectory $oldCrash 'OldProjects'
+    [IO.Directory]::Delete($oldDirectory.Vault, $true)
+    $oldDesktopFolder = Join-Path $oldCrash.Desktop 'OldProjects'
+    [IO.Directory]::CreateDirectory($oldDesktopFolder) | Out-Null
+    Write-Text (Join-Path $oldDesktopFolder 'important.txt') 'original moved directory'
+    & $module {
+        param($DesktopPath, $DataRoot, $Id, $Destination)
+        $state = Get-DIState $DesktopPath $DataRoot
+        $tid = [guid]::NewGuid().ToString('N')
+        $op = [pscustomobject]@{Mode='Move'; ItemId=$Id; Source=(Join-Path $DesktopPath 'OldProjects'); Destination=$Destination; State='Started'; RecoveryPath=(Join-Path (Join-Path (Join-Path $state.VaultRoot 'recovery') $tid) '0')}
+        $journal = [pscustomobject]@{Version=1; Id=$tid; DesktopPath=$state.DesktopPath; VaultRoot=$state.VaultRoot; Status='Pending'; CatalogBefore=$state.Catalog; Operations=@($op)}
+        Write-DIJson (Join-Path $DataRoot 'transaction.json') $journal
+        [IO.Directory]::Move($op.Source, $op.Destination)
+    } $oldCrash.Desktop $oldCrash.Data $oldDirectory.Record.Id $oldDirectory.Vault
+    Assert-True (Repair-DesktopItemsTransaction -DataRoot $oldCrash.Data) '旧版本未完成目录移动可回滚一次'
+    Assert-Equal 'original moved directory' (Read-Text (Join-Path $oldDesktopFolder 'important.txt')) '旧目录事务回滚恢复原始内容和路径'
+    Assert-True (-not (Repair-DesktopItemsTransaction -DataRoot $oldCrash.Data)) '旧目录事务回滚完成后幂等'
+    $postRepair = Invoke-WithoutDirectoryReads @($oldDesktopFolder, $oldDirectory.Backup) {
+        Restore-DesktopItemsSnapshot -DesktopPath $oldCrash.Desktop -DataRoot $oldCrash.Data -Snapshot $emptySnapshot
+    }
+    Assert-Equal 0 $postRepair.Stashed '旧事务修复后不会再次管理该目录'
+    Assert-Equal 'original moved directory' (Read-Text (Join-Path $oldDesktopFolder 'important.txt')) '修复后切换仍保留目录原处'
+    Assert-Throws { & $module { param($Path) Get-DIFingerprint $Path } $oldDesktopFolder } '文件夹.*不处理' '底层内容指纹拒绝目录'
+    Assert-Throws { & $module { param($Source,$Destination) Copy-DIItem $Source $Destination } $oldDesktopFolder (Join-Path $root 'forbidden-copy') } '文件夹.*不处理' '底层复制拒绝目录'
+    Assert-Throws { & $module { param($Source,$Destination) Move-DIItem $Source $Destination } $oldDesktopFolder (Join-Path $root 'forbidden-move') } '文件夹.*不移动' '新事务底层移动拒绝目录'
+    Assert-True (Test-Path -LiteralPath $oldDesktopFolder) '底层目录防护失败时保留原处'
+
+    $orphanDirectoryScene = [pscustomobject]@{Version=2; Items=@([pscustomobject]@{Id=[guid]::NewGuid().ToString('N'); Name='DeletedFolder'; Kind='Directory'})}
+    $orphanResult = Restore-DesktopItemsSnapshot -DesktopPath $oldCrash.Desktop -DataRoot $oldCrash.Data -Snapshot $orphanDirectoryScene
+    Assert-Equal 1 $orphanResult.PreservedDirectory '旧目录条目索引缺失时仍忽略而不报错'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $oldCrash.Desktop 'DeletedFolder'))) '旧目录条目索引缺失时不创建目录'
+    $malformedDirectory = [pscustomobject]@{Version=2; Items=@([pscustomobject]@{Id=$oldDirectory.Record.Id; Name='..\outside'; Kind='Directory'})}
+    Assert-Throws { Restore-DesktopItemsSnapshot -DesktopPath $oldCrash.Desktop -DataRoot $oldCrash.Data -Snapshot $malformedDirectory } '无效.*名称' '忽略目录条目前仍验证路径名称'
+
+    $oldCopyPath = Join-Path $oldCrash.Desktop 'InterruptedDirectoryCopy'
+    [IO.Directory]::CreateDirectory($oldCopyPath) | Out-Null
+    Write-Text (Join-Path $oldCopyPath 'edited.txt') 'edited interrupted directory copy'
+    $oldCopyRecovery = & $module {
+        param($DesktopPath, $DataRoot, $Id, $Source, $Destination)
+        $state = Get-DIState $DesktopPath $DataRoot
+        $tid = [guid]::NewGuid().ToString('N')
+        $recovery = Join-Path (Join-Path (Join-Path $state.VaultRoot 'recovery') $tid) '0'
+        $op = [pscustomobject]@{Mode='Copy'; ItemId=$Id; Source=$Source; Destination=$Destination; State='Started'; RecoveryPath=$recovery}
+        $journal = [pscustomobject]@{Version=1; Id=$tid; DesktopPath=$state.DesktopPath; VaultRoot=$state.VaultRoot; Status='Pending'; CatalogBefore=$state.Catalog; Operations=@($op)}
+        Write-DIJson (Join-Path $DataRoot 'transaction.json') $journal
+        return $recovery
+    } $oldCrash.Desktop $oldCrash.Data $oldDirectory.Record.Id $oldDirectory.Backup $oldCopyPath
+    Assert-True (Repair-DesktopItemsTransaction -DataRoot $oldCrash.Data) '旧版本未完成目录复制也能安全回滚'
+    Assert-True (-not (Test-Path -LiteralPath $oldCopyPath)) '旧复制事务的未完成副本离开桌面'
+    Assert-Equal 'edited interrupted directory copy' (Read-Text (Join-Path $oldCopyRecovery 'edited.txt')) '旧复制回滚保留副本后来编辑在 recovery'
+    Assert-Equal 'original directory backup' (Read-Text (Join-Path $oldDirectory.Backup 'backup.txt')) '旧复制回滚保留原目录备份'
 
     if ($env:OS -eq 'Windows_NT') {
-        # Native Windows identities survive real directory renames. A record
-        # whose former shared name is stale must not cause its wanted current
-        # ordinary directory to be omitted from the target and then stashed.
-        $renamedShared = New-Area 'shared-name-renamed-back'
-        $formerApps = Join-Path $renamedShared.Desktop 'FormerApps'
-        $renamedApps = Join-Path $renamedShared.Desktop 'Apps'
-        [IO.Directory]::CreateDirectory($formerApps) | Out-Null
-        Write-Text (Join-Path $formerApps 'important.txt') 'renamed project must stay'
-        $formerScene = Save-DesktopItemsSnapshot -DesktopPath $renamedShared.Desktop -DataRoot $renamedShared.Data
-        [IO.Directory]::Move($formerApps, $renamedApps)
-        $renamedAppsScene = Save-DesktopItemsSnapshot -DesktopPath $renamedShared.Desktop -DataRoot $renamedShared.Data
-        Assert-Equal $formerScene.Items[0].Id $renamedAppsScene.Items[0].Id '真实重命名为 Apps 保持同一项目身份'
-        $protectedAlias = Invoke-WithoutSharedReads $renamedApps {
-            Restore-DesktopItemsSnapshot -DesktopPath $renamedShared.Desktop -DataRoot $renamedShared.Data -Snapshot $formerScene -SharedNames @('Apps')
-        }
-        Assert-Equal 1 $protectedAlias.PreservedShared '真实曾用名称不取回当前共有 Apps 的副本'
-        Assert-Equal 0 $protectedAlias.Stashed '真实共有 Apps 不被收纳'
-        Assert-True (-not (Test-Path -LiteralPath $formerApps)) 'Apps 仍共有时不以曾用名称创建副本'
-        Assert-Equal 'renamed project must stay' (Read-Text (Join-Path $renamedApps 'important.txt')) '共有 Apps 项目保持原位置内容'
-        [IO.Directory]::Move($renamedApps, $formerApps)
-        # No save after the second rename: the catalog still says Apps here.
-        $renamedBack = Restore-DesktopItemsSnapshot -DesktopPath $renamedShared.Desktop -DataRoot $renamedShared.Data -Snapshot $formerScene -SharedNames @('Apps')
-        Assert-Equal 0 $renamedBack.PreservedShared '已改回普通名称的项目不再按过期索引排除'
-        Assert-Equal 0 $renamedBack.Stashed '目标中已存在的改名普通目录不会被错误收纳'
-        Assert-Equal 0 $renamedBack.Restored '目标中已存在的改名普通目录无需补齐'
-        Assert-Equal 'renamed project must stay' (Read-Text (Join-Path $formerApps 'important.txt')) '未保存的改名目录恢复原场景后留在桌面'
-        $renamedBackCatalog = Read-Text (Join-Path $renamedShared.Data 'items.json') | ConvertFrom-Json
-        $renamedBackRecord = @($renamedBackCatalog.Items | Where-Object Id -eq $formerScene.Items[0].Id)[0]
-        Assert-Equal 'FormerApps' $renamedBackRecord.Name '共有身份保护依据捕获后的当前名称'
-        $renamedBackEmpty = Restore-DesktopItemsSnapshot -DesktopPath $renamedShared.Desktop -DataRoot $renamedShared.Data -Snapshot $emptySnapshot -SharedNames @('Apps')
-        Assert-Equal 1 $renamedBackEmpty.Stashed '改回普通名称的目录仍可按场景正常收纳'
-        Restore-DesktopItemsSnapshot -DesktopPath $renamedShared.Desktop -DataRoot $renamedShared.Data -Snapshot $formerScene -SharedNames @('Apps') | Out-Null
-        Assert-Equal 'renamed project must stay' (Read-Text (Join-Path $formerApps 'important.txt')) '改回普通名称的目录仍可正常往返'
-
-        # Reproduce pnpm's nested junction beneath Desktop/Apps. Initial saves
-        # must not inspect identities, fingerprint or back up this directory.
-        $pnpmShared = New-Area 'shared-pnpm-initial-save'
+        # Nested pnpm junctions and top-level directory junctions are both ignored.
+        $pnpmShared = New-Area 'pnpm-directories-position-only'
         $pnpmApps = Join-Path $pnpmShared.Desktop 'Apps'
         $pnpmPath = Join-Path $pnpmApps 'diet-tracker\node_modules\.pnpm\@babel+code-frame@7.29.7\node_modules\@babel\helper-validator-identifier'
         $pnpmOutside = Join-Path $root 'pnpm-save-outside'
         [IO.Directory]::CreateDirectory($pnpmOutside) | Out-Null
-        Write-Text (Join-Path $pnpmOutside 'sentinel.txt') 'initial pnpm target'
+        Write-Text (Join-Path $pnpmOutside 'sentinel.txt') 'pnpm target untouched'
         New-TestJunction $pnpmPath $pnpmOutside
         Write-Text (Join-Path $pnpmShared.Desktop 'regular.txt') 'regular file still backed up'
-        $pnpmScene = Invoke-WithoutSharedReads $pnpmApps {
-            Save-DesktopItemsSnapshot -DesktopPath $pnpmShared.Desktop -DataRoot $pnpmShared.Data -SharedNames @('Apps')
+        $pnpmScene = Invoke-WithoutDirectoryReads @($pnpmApps, $pnpmOutside) {
+            Save-DesktopItemsSnapshot -DesktopPath $pnpmShared.Desktop -DataRoot $pnpmShared.Data
         }
-        Assert-Equal 1 $pnpmScene.Items.Count '含嵌套 pnpm 联接的共有 Apps 不阻断保存'
+        Assert-Equal 1 $pnpmScene.Items.Count '未设共有名单的 pnpm 目录不阻断保存'
         $pnpmCatalog = Read-Text (Join-Path $pnpmShared.Data 'items.json') | ConvertFrom-Json
-        Assert-Equal 0 @($pnpmCatalog.Items | Where-Object Name -eq 'Apps').Count '共有 Apps 不扫描或写入项目身份索引'
-        Assert-Equal 1 @(Get-ChildItem -LiteralPath (Join-Path $pnpmShared.Data 'backup') -Directory).Count '仅普通文件有备份，不复制 Apps'
-        Assert-Equal 'initial pnpm target' (Read-Text (Join-Path $pnpmOutside 'sentinel.txt')) '初次保存不修改 pnpm 外部目标'
-        Assert-Throws { Save-DesktopItemsSnapshot -DesktopPath $pnpmShared.Desktop -DataRoot $pnpmShared.Data } '链接.*云占位' 'Apps 未设为共有时仍保留链接保护'
-        Assert-Equal 'regular file still backed up' (Read-Text (Join-Path $pnpmShared.Desktop 'regular.txt')) '非共有链接预检失败不移动普通文件'
+        Assert-Equal 0 @($pnpmCatalog.Items | Where-Object Kind -eq 'Directory').Count 'pnpm 目录不写入内容索引'
+        Assert-Equal 1 @(Get-ChildItem -LiteralPath (Join-Path $pnpmShared.Data 'backup') -Directory).Count 'pnpm 目录不创建备份'
+        Invoke-WithoutDirectoryReads @($pnpmApps, $pnpmOutside) {
+            Restore-DesktopItemsSnapshot -DesktopPath $pnpmShared.Desktop -DataRoot $pnpmShared.Data -Snapshot $emptySnapshot
+        } | Out-Null
+        Assert-True (([IO.File]::GetAttributes($pnpmPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0) '嵌套 pnpm 联接保持原位置'
+        Assert-Equal 'pnpm target untouched' (Read-Text (Join-Path $pnpmOutside 'sentinel.txt')) 'pnpm 外部目标保持完整'
 
         $links = New-Area 'junction'
         $outside = Join-Path $root 'outside-target'
@@ -403,10 +466,24 @@ try {
         Write-Text (Join-Path $outside 'outside.txt') 'outside must remain untouched'
         $junction = Join-Path $links.Desktop 'LinkedFolder'
         New-Item -ItemType Junction -Path $junction -Target $outside | Out-Null
-        Assert-Throws { Save-DesktopItemsSnapshot -DesktopPath $links.Desktop -DataRoot $links.Data } '链接.*云占位' '备份不跟随目录联接'
+        $junctionScene = Invoke-WithoutDirectoryReads @($junction, $outside) { Save-DesktopItemsSnapshot -DesktopPath $links.Desktop -DataRoot $links.Data }
+        Assert-Equal 0 $junctionScene.Items.Count '顶层目录联接也只保存位置，不作为文件处理'
+        Invoke-WithoutDirectoryReads @($junction, $outside) { Restore-DesktopItemsSnapshot -DesktopPath $links.Desktop -DataRoot $links.Data -Snapshot $emptySnapshot } | Out-Null
+        Assert-True (Test-Path -LiteralPath $junction) '空场景保留顶层目录联接'
         Assert-Equal 'outside must remain untouched' (Read-Text (Join-Path $outside 'outside.txt')) '链接目标未被移动或修改'
         # Remove just the junction, never recursively remove its target.
         [IO.Directory]::Delete($junction)
+
+        # File symbolic links retain the preflight protection; ordinary .lnk/.url
+        # shortcut files remain managed and never lead to target-directory scans.
+        $fileLinkArea = New-Area 'file-symbolic-link-protection'
+        $fileLink = Join-Path $fileLinkArea.Desktop 'linked-file.txt'
+        $linkTarget = Join-Path $outside 'outside.txt'
+        New-Item -ItemType SymbolicLink -Path $fileLink -Target $linkTarget | Out-Null
+        try {
+            Assert-Throws { Save-DesktopItemsSnapshot -DesktopPath $fileLinkArea.Desktop -DataRoot $fileLinkArea.Data } '链接.*云占位' '顶层文件符号链接仍被预检拒绝'
+            Assert-Equal 'outside must remain untouched' (Read-Text $linkTarget) '文件链接目标保持原内容'
+        } finally { [IO.File]::Delete($fileLink) }
 
         # GitHub's Windows runner checks out on D: while Temp is on C:. Exercise
         # the actual cross-volume backup path without touching a real user desktop.
@@ -428,7 +505,8 @@ try {
             Write-Text (Join-Path $crossFolder 'result.txt') 'cross-volume folder content'
             $crossBig = Save-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData
             $crossResult = Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossSmall
-            Assert-Equal 2 $crossResult.Stashed '跨盘桌面收纳文件与目录'
+            Assert-Equal 1 $crossResult.Stashed '跨盘桌面仅收纳文件'
+            Assert-True (Test-Path -LiteralPath $crossFolder) '跨盘目录始终保持原处'
             Assert-Equal $repositoryVolume ([IO.Path]::GetPathRoot($crossResult.VaultRoot)) '跨盘收纳库与桌面处于同一盘'
             Assert-True (-not $crossResult.VaultRoot.StartsWith($crossData + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) '跨盘收纳库不放在数据目录盘'
             $hiddenSibling = [IO.Path]::GetDirectoryName($crossResult.VaultRoot)
@@ -437,7 +515,7 @@ try {
             Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossBig | Out-Null
             Assert-Equal 'cross-volume shortcut bytes' (Read-Text $crossExtra) '同卷移动往返保持文件完整'
             Assert-Equal 'cross-volume folder content' (Read-Text (Join-Path $crossFolder 'result.txt')) '同卷移动往返保持目录完整'
-            Assert-True (Test-Path -LiteralPath (Join-Path $crossFolder 'Empty')) '跨盘备份和移动保留空目录'
+            Assert-True (Test-Path -LiteralPath (Join-Path $crossFolder 'Empty')) '跨盘切换不触碰目录及空子目录'
             Write-Text (Join-Path $crossFolder 'result.txt') 'latest cross-volume folder edit'
             [IO.File]::Delete($crossExtra)
             Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossSmall | Out-Null

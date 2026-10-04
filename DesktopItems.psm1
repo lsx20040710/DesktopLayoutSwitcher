@@ -44,16 +44,15 @@ function Assert-DIId([string]$Id) {
 function Assert-DINotReparse([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "为保护原始数据，暂不处理链接或云占位项目：$Path。可将其桌面顶层文件夹加入始终保留在桌面名单，或使用完整下载的普通文件副本。"
+        throw "为保护原始数据，暂不处理链接或云占位项目：$Path。可将此文件加入始终保留在桌面名单，或使用完整下载的普通文件副本。"
     }
     return $item
 }
 
-function Assert-DITreeSafe([string]$Path) {
+function Assert-DIFileSafe([string]$Path) {
     $item = Assert-DINotReparse $Path
-    if ($item.PSIsContainer) {
-        foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) { Assert-DITreeSafe $child.FullName }
-    }
+    if ($item.PSIsContainer) { throw "文件夹只保存图标位置，不处理其内容：$Path" }
+    return $item
 }
 
 function New-DIDirectory([string]$Path) {
@@ -145,6 +144,7 @@ namespace DesktopItemsNative {
 }
 
 function Get-DIIdentity($Item) {
+    if ($Item.PSIsContainer) { throw '文件夹不读取项目身份。' }
     if ($env:OS -eq 'Windows_NT') {
         Initialize-DIIdentityType
         return [DesktopItemsNative.Identity]::Read($Item.FullName)
@@ -161,7 +161,7 @@ function Get-DISharedSet([string[]]$SharedNames) {
 }
 
 function Get-DIDesktopEntries($State, $SharedSet) {
-    return @(Get-ChildItem -LiteralPath $State.DesktopPath -Force -ErrorAction Stop | Where-Object { -not $SharedSet.Contains($_.Name) })
+    return @(Get-ChildItem -LiteralPath $State.DesktopPath -Force -ErrorAction Stop | Where-Object { -not $_.PSIsContainer -and -not $SharedSet.Contains($_.Name) })
 }
 
 function Get-DIFileHash([string]$Path) {
@@ -172,13 +172,8 @@ function Get-DIFileHash([string]$Path) {
 }
 
 function Add-DIFingerprintEntries([string]$Path, [string]$RelativePath, $Lines) {
-    $item = Assert-DINotReparse $Path
-    if ($item.PSIsContainer) {
-        [void]$Lines.Add('D:' + $RelativePath)
-        foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Sort-Object Name)) {
-            Add-DIFingerprintEntries $child.FullName ($RelativePath + '/' + $child.Name) $Lines
-        }
-    } else { [void]$Lines.Add('F:' + $RelativePath + ':' + $item.Length + ':' + (Get-DIFileHash $Path)) }
+    $item = Assert-DIFileSafe $Path
+    [void]$Lines.Add('F:' + $RelativePath + ':' + $item.Length + ':' + (Get-DIFileHash $Path))
 }
 
 function Get-DIFingerprint([string]$Path) {
@@ -189,25 +184,19 @@ function Get-DIFingerprint([string]$Path) {
 
 function Copy-DIItem([string]$Source, [string]$Destination) {
     if (Test-Path -LiteralPath $Destination) { throw "拒绝覆盖已有项目：$Destination" }
-    $item = Assert-DINotReparse $Source
+    $item = Assert-DIFileSafe $Source
     New-DIDirectory ([IO.Path]::GetDirectoryName($Destination))
-    if ($item.PSIsContainer) {
-        New-DIDirectory $Destination
-        foreach ($child in @(Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) { Copy-DIItem $child.FullName (Join-Path $Destination $child.Name) }
-        [IO.Directory]::SetCreationTimeUtc($Destination, $item.CreationTimeUtc)
-        [IO.Directory]::SetLastWriteTimeUtc($Destination, $item.LastWriteTimeUtc)
-    } else {
-        # Hold a read-only sharing lock while CopyFile preserves streams and attributes.
-        $readLock = New-Object IO.FileStream($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-        try { [IO.File]::Copy($Source, $Destination, $false) }
-        finally { $readLock.Dispose() }
-    }
+    # Hold a read-only sharing lock while CopyFile preserves streams and attributes.
+    $readLock = New-Object IO.FileStream($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try { [IO.File]::Copy($Source, $Destination, $false) }
+    finally { $readLock.Dispose() }
     [IO.File]::SetAttributes($Destination, $item.Attributes)
 }
 
-function Move-DIItem([string]$Source, [string]$Destination) {
+function Move-DIItem([string]$Source, [string]$Destination, [bool]$AllowLegacyDirectory = $false) {
     if (Test-Path -LiteralPath $Destination) { throw "拒绝覆盖已有项目：$Destination" }
     $item = Assert-DINotReparse $Source
+    if ($item.PSIsContainer -and -not $AllowLegacyDirectory) { throw "文件夹只保存图标位置，不移动其内容：$Source" }
     New-DIDirectory ([IO.Path]::GetDirectoryName($Destination))
     if ($item.PSIsContainer) { [IO.Directory]::Move($Source, $Destination) }
     else { [IO.File]::Move($Source, $Destination) }
@@ -226,8 +215,9 @@ function Get-DIBackupPath($State, $Item) {
 
 function Save-DICore($State, $SharedSet) {
     $entries = @(Get-DIDesktopEntries $State $SharedSet)
-    # Validate all trees before creating a backup; never follow a directory junction.
-    foreach ($entry in $entries) { Assert-DIName $entry.Name; Assert-DITreeSafe $entry.FullName }
+    # Only top-level files are managed. Directories (including junctions) were
+    # filtered before validation, identity reads, fingerprints or backups.
+    foreach ($entry in $entries) { Assert-DIName $entry.Name; [void](Assert-DIFileSafe $entry.FullName) }
     $identityByPath = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     $presentIdentities = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($entry in $entries) {
@@ -237,7 +227,7 @@ function Save-DICore($State, $SharedSet) {
     }
     $captured = New-Object 'Collections.Generic.List[object]'
     foreach ($entry in $entries) {
-        $kind = if ($entry.PSIsContainer) { 'Directory' } else { 'File' }
+        $kind = 'File'
         $identity = $identityByPath[$entry.FullName]
         $existing = @($State.Catalog.Items | Where-Object { $_.Identity -eq $identity -and $_.Kind -eq $kind })
         if ($existing.Count -eq 0) {
@@ -305,11 +295,11 @@ function Undo-DITransaction($State, $Journal) {
         $destinationExists = Test-Path -LiteralPath $operation.Destination
         if ($operation.Mode -eq 'Move') {
             if ($sourceExists -and $destinationExists) { throw "事务恢复遇到同名冲突，两个版本均保留：$($operation.Source)；$($operation.Destination)" }
-            if (-not $sourceExists -and $destinationExists) { Move-DIItem $operation.Destination $operation.Source }
+            if (-not $sourceExists -and $destinationExists) { Move-DIItem $operation.Destination $operation.Source $true }
             elseif (-not $sourceExists -and -not $destinationExists) { throw "事务项目的源和目标均不存在，请检查备份：$($operation.Source)" }
         } elseif ($destinationExists) {
             # An interrupted restored copy might have since been edited. Keep it rather than delete.
-            Move-DIItem $operation.Destination $operation.RecoveryPath
+            Move-DIItem $operation.Destination $operation.RecoveryPath $true
         }
         $operation.State = 'RolledBack'
         Write-DIJson (Join-Path $State.DataRoot 'transaction.json') $Journal
@@ -365,19 +355,15 @@ function Invoke-DITransaction($State, $Operations, $SharedSet = $null) {
             Write-DIJson $journalPath $journal
         }
         foreach ($record in @($State.Catalog.Items)) {
-            # Shared records can predate the exclusion list. Keep their vault copies and
-            # metadata untouched, and never open the shared desktop item for identity.
-            if ($null -ne $SharedSet -and $SharedSet.Contains($record.Name)) { continue }
+            # Legacy folder archives and unrelated file records remain untouched.
+            # A historical file name may now be a real directory on the desktop.
+            if ($record.Kind -eq 'Directory' -or ($null -ne $SharedSet -and $SharedSet.Contains($record.Name))) { continue }
+            $changed = @($Operations | Where-Object { $_.ItemId -eq $record.Id })
+            if ($changed.Count -eq 0) { continue }
             $desktopItemPath = Join-Path $State.DesktopPath $record.Name
             $vaultItemPath = Get-DIVaultPath $State $record.Id
-            if (Test-Path -LiteralPath $vaultItemPath) { $record.Identity = Get-DIIdentity (Get-Item -LiteralPath $vaultItemPath -Force) }
-            elseif (Test-Path -LiteralPath $desktopItemPath) {
-                $desktopItem = Get-Item -LiteralPath $desktopItemPath -Force
-                $currentIdentity = Get-DIIdentity $desktopItem
-                # Only refresh IDs that were actually restored; unrelated same-name objects keep their identity.
-                $restored = @($Operations | Where-Object { $_.Destination -eq $desktopItemPath -and $_.ItemId -eq $record.Id })
-                if ($restored.Count -gt 0) { $record.Identity = $currentIdentity }
-            }
+            if (Test-Path -LiteralPath $vaultItemPath) { $record.Identity = Get-DIIdentity (Assert-DIFileSafe $vaultItemPath) }
+            elseif (Test-Path -LiteralPath $desktopItemPath) { $record.Identity = Get-DIIdentity (Assert-DIFileSafe $desktopItemPath) }
         }
         Write-DIJson $State.CatalogPath $State.Catalog
         $journal.Status = 'Committed'
@@ -396,14 +382,25 @@ function Restore-DICore($State, $Snapshot, $SharedSet, [bool]$MergeOnly) {
     $wantedByName = New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
     $wantedIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $wantedItems = New-Object 'Collections.Generic.List[object]'
+    $directoryNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in @(Get-ChildItem -LiteralPath $State.DesktopPath -Force -ErrorAction Stop)) {
+        if ($entry.PSIsContainer) { [void]$directoryNames.Add($entry.Name) }
+    }
+    $directoryIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in @($State.Catalog.Items)) {
+        if ($record.Kind -eq 'Directory') { [void]$directoryIds.Add($record.Id) }
+    }
     $preservedShared = 0
+    $preservedDirectory = 0
     foreach ($wanted in @($Snapshot.Items)) {
-        # Older scenes may contain a now-shared folder. Validate the name before
-        # skipping it, without resolving its ID, traversing it or preparing a copy.
         Assert-DIName $wanted.Name
+        # Old Version=2 scenes retain their directory records on disk, but folder
+        # contents, historical IDs and current directory-name collisions are ignored.
+        if ($wanted.Kind -eq 'Directory' -or $directoryNames.Contains($wanted.Name)) { $preservedDirectory++; continue }
         if ($SharedSet.Contains($wanted.Name)) { $preservedShared++; continue }
         Assert-DIId $wanted.Id
-        if ($wanted.Kind -notin @('File', 'Directory') -or $wantedByName.ContainsKey($wanted.Name) -or -not $wantedIds.Add($wanted.Id)) { throw '场景包含重复项目名称、身份或无效类型。' }
+        if ($directoryIds.Contains($wanted.Id)) { $preservedDirectory++; continue }
+        if ($wanted.Kind -ne 'File' -or $wantedByName.ContainsKey($wanted.Name) -or -not $wantedIds.Add($wanted.Id)) { throw '场景包含重复项目名称、身份或无效类型。' }
         $wantedByName.Add($wanted.Name, $wanted)
         [void]$wantedItems.Add($wanted)
     }
@@ -412,7 +409,7 @@ function Restore-DICore($State, $Snapshot, $SharedSet, [bool]$MergeOnly) {
     # its catalog name before deciding which historical IDs remain shared.
     $sharedIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($record in @($State.Catalog.Items)) {
-        if ($SharedSet.Contains($record.Name)) { [void]$sharedIds.Add($record.Id) }
+        if ($record.Kind -eq 'File' -and $SharedSet.Contains($record.Name)) { [void]$sharedIds.Add($record.Id) }
     }
     $currentByName = New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($item in @($current.Items)) { $currentByName.Add($item.Name, $item) }
@@ -433,16 +430,18 @@ function Restore-DICore($State, $Snapshot, $SharedSet, [bool]$MergeOnly) {
         $sameIdAtOtherName = @($current.Items | Where-Object { $_.Id -eq $wanted.Id })
         if ($sameIdAtOtherName.Count -gt 0) { throw "项目已在桌面重命名，请先保存新场景或恢复原名称：$($wanted.Name)。" }
         $source = Get-DIVaultPath $State $wanted.Id
+        if ((Test-Path -LiteralPath $source) -and (Get-Item -LiteralPath $source -Force).PSIsContainer) { $preservedDirectory++; continue }
         if (-not (Test-Path -LiteralPath $source)) {
             $backupSource = Get-DIBackupPath $State $record
             if (-not (Test-Path -LiteralPath $backupSource)) { throw "收纳项目及备份均不存在，已暂停：$($wanted.Name)" }
+            if ((Get-Item -LiteralPath $backupSource -Force).PSIsContainer) { $preservedDirectory++; continue }
             # Prepare on the desktop's volume first. The transaction itself then uses atomic moves only.
             $source = Join-Path (Join-Path (Join-Path $State.VaultRoot 'recovery') ([guid]::NewGuid().ToString('N'))) 'content'
             Copy-DIItem $backupSource $source
             if ((Get-DIFingerprint $backupSource) -ne (Get-DIFingerprint $source)) { throw "恢复副本校验失败，原始备份与准备副本均已保留。准备副本：$source" }
         }
         if (-not (Test-Path -LiteralPath $source)) { throw "收纳项目及备份均不存在，已暂停：$($wanted.Name)" }
-        Assert-DITreeSafe $source
+        [void](Assert-DIFileSafe $source)
         $record.Name = $wanted.Name
         [void]$incoming.Add([pscustomobject]@{Mode = 'Move'; ItemId = $wanted.Id; Source = $source; Destination = (Join-Path $State.DesktopPath $wanted.Name); State = 'Pending'})
     }
@@ -460,7 +459,7 @@ function Restore-DICore($State, $Snapshot, $SharedSet, [bool]$MergeOnly) {
     }
     foreach ($operation in $incoming) { [void]$operations.Add($operation) }
     Invoke-DITransaction $State $operations.ToArray() $SharedSet
-    return [pscustomobject]@{Stashed = $stashedCount; Restored = $incoming.Count; PreservedShared = $preservedShared; VaultRoot = $State.VaultRoot; RecoveryRoot = (Join-Path $State.VaultRoot 'recovery')}
+    return [pscustomobject]@{Stashed = $stashedCount; Restored = $incoming.Count; PreservedShared = $preservedShared; PreservedDirectory = $preservedDirectory; VaultRoot = $State.VaultRoot; RecoveryRoot = (Join-Path $State.VaultRoot 'recovery')}
 }
 
 function Save-DesktopItemsSnapshot {

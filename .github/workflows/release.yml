@@ -136,7 +136,8 @@ jobs:
               '- `Setup-x64.exe`：当前用户安装，无需管理员权限。\n'
               '- `Portable-x64.zip`：解压整个目录后运行 `DesktopLayoutSwitcher.exe`。\n'
               '- `SHA256SUMS.txt`：下载文件校验值。\n\n'
-              '默认将桌面 Apps 目录设为所有场景共有，可在界面中编辑共有项目名单。共有项目不递归备份、不收纳、不补齐，含 pnpm 联接的项目目录可以留在桌面。\n\n'
+              '所有桌面文件夹仅恢复图标位置，不读取其内部内容、不备份、不收纳、不补齐；含 pnpm 联接的项目目录保持原处。普通文件和快捷方式仍按场景补齐与收纳，可在界面中设置始终保留的文件。\n\n'
+              '安装时可选择布局和恢复数据的存储目录，启动时沿用已保存的选择。此版本处理 [Issue #1](https://github.com/lsx20040710/DesktopLayoutSwitcher/issues/1) 中的目录与数据位置需求。\n\n'
               '布局、桌面条目存档和恢复备份是本机数据，不包含在安装包中。\n\n'
               f'源代码版本：`{target}`。\n\n'
               f'[使用说明](https://github.com/{repository}/blob/{tag}/README.md)\n',

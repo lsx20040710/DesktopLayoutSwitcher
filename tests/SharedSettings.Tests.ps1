@@ -94,20 +94,20 @@ function Invoke-SettingsDialogProbe([System.Windows.Forms.Form]$Owner, [string]$
             $control = $lists[0]
             $appsIndex = $control.Items.IndexOf('Apps')
             $notesIndex = $control.Items.IndexOf('Notes.txt')
-            Assert-True ($appsIndex -ge 0 -and $notesIndex -ge 0) 'settings dialog lists real top-level desktop entries'
+            Assert-Equal -1 $appsIndex 'Apps is a real directory and is always protected outside the optional list'
+            Assert-Equal -1 $control.Items.IndexOf('Other Research') 'every real directory is protected outside the optional list'
+            Assert-True ($notesIndex -ge 0) 'settings dialog lists optional top-level desktop files'
             Assert-Equal -1 $control.Items.IndexOf('desktop.ini') 'desktop.ini is automatically protected, outside the configurable list'
             Assert-Equal -1 $control.Items.IndexOf('DesktopLayoutSwitcher.lnk') 'the tool shortcut is automatically protected, outside the configurable list'
+            $description = ($targetDialog.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] } | ForEach-Object { $_.Text }) -join "`n"
+            Assert-True ($description -match '所有(?:真实)?文件夹' -and $description -match '位置') 'the dialog explains that folders always remain and only their icon positions change'
             if ($script:dialogProbe.Mode -eq 'Save') {
-                Assert-True $control.GetItemChecked($appsIndex) 'Apps is checked on the first settings dialog'
                 Assert-True (-not $control.GetItemChecked($notesIndex)) 'ordinary desktop entries are initially unchecked'
-                $control.SetItemChecked($appsIndex, $false)
                 $control.SetItemChecked($notesIndex, $true)
                 $buttonText = '保存名单'
             }
             else {
-                Assert-True (-not $control.GetItemChecked($appsIndex)) 'saved exclusions are loaded on reopening the dialog'
                 Assert-True $control.GetItemChecked($notesIndex) 'saved selected entries are checked on reopening'
-                $control.SetItemChecked($appsIndex, $true)
                 $control.SetItemChecked($notesIndex, $false)
                 $buttonText = '取消'
             }
@@ -143,6 +143,8 @@ try {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
     $helperNames = @(
+        'Get-StorageSettingsPath',
+        'Get-DefaultProfileRoot',
         'Write-LayoutJson',
         'ConvertTo-SharedDesktopNames',
         'Get-SharedDesktopSettingsPath',
@@ -165,6 +167,98 @@ try {
         $body = [System.Management.Automation.Language.ScriptBlockAst]$matching[0].Body.Copy()
         Set-Item -Path "Function:$name" -Value ($body.GetScriptBlock())
     }
+
+    # The bootstrap chooses a data directory without reading or writing a real
+    # user's preferences. A corrupt preference must not silently choose a new
+    # directory and strand layouts, backups or a pending desktop transaction.
+    $expectedStoragePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DesktopLayoutSwitcher\storage.json'
+    $expectedDefaultRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DesktopLayoutSwitcher\profiles'
+    Assert-Equal $expectedStoragePath (Get-StorageSettingsPath) 'storage preference has a fixed per-user bootstrap location'
+    $preferenceArea = Join-Path $testRoot 'storage-preference'
+    $preferencePath = Join-Path $preferenceArea 'storage.json'
+    Assert-Equal $expectedDefaultRoot (Get-DefaultProfileRoot -PreferencePath $preferencePath) 'a missing preference retains the established default data directory'
+    Assert-True (-not (Test-Path -LiteralPath $preferencePath)) 'reading the default does not create a preference file'
+    Assert-True (-not (Test-Path -LiteralPath $preferenceArea)) 'reading the default does not create any directories'
+    [IO.Directory]::CreateDirectory($preferenceArea) | Out-Null
+    $customRoot = 'D:\科研 数据\桌面布局 profiles'
+    $customPreferenceText = ([pscustomobject]@{SchemaVersion = 1; ProfileRoot = $customRoot}) | ConvertTo-Json
+    Write-Text $preferencePath $customPreferenceText
+    Write-Text "$preferencePath.bak" 'previous bootstrap preferences must stay untouched'
+    Assert-Equal ([IO.Path]::GetFullPath($customRoot)) (Get-DefaultProfileRoot -PreferencePath $preferencePath) 'a saved absolute drive path supports Unicode and spaces'
+    Assert-Equal $customPreferenceText (Read-Text $preferencePath) 'reading a custom storage directory does not rewrite preferences'
+    Assert-Equal 'previous bootstrap preferences must stay untouched' (Read-Text "$preferencePath.bak") 'reading storage preferences does not replace the backup'
+    # Inno Setup may persist UTF-8 without a BOM. Windows PowerShell 5.1 must
+    # decode it explicitly instead of interpreting the path using its ANSI default.
+    [IO.File]::WriteAllText($preferencePath, $customPreferenceText, [Text.UTF8Encoding]::new($false))
+    $preferenceBytes = [IO.File]::ReadAllBytes($preferencePath)
+    Assert-True (-not ($preferenceBytes[0] -eq 0xef -and $preferenceBytes[1] -eq 0xbb -and $preferenceBytes[2] -eq 0xbf)) 'the Unicode storage fixture is actually UTF-8 without a BOM'
+    Assert-Equal ([IO.Path]::GetFullPath($customRoot)) (Get-DefaultProfileRoot -PreferencePath $preferencePath) 'UTF-8 without a BOM preserves the selected Unicode storage path'
+    Assert-Equal $customPreferenceText (Read-Text $preferencePath) 'reading BOM-less preferences leaves the original file unchanged'
+    $uncRoot = '\\server\share\Research Profiles'
+    Write-Text $preferencePath (([pscustomobject]@{SchemaVersion = 1; ProfileRoot = $uncRoot}) | ConvertTo-Json)
+    Assert-Equal ([IO.Path]::GetFullPath($uncRoot)) (Get-DefaultProfileRoot -PreferencePath $preferencePath) 'a saved UNC path resolves without accessing the network share'
+    $normalizedRoot = 'D:\Research Profiles\prior\..\current'
+    Write-Text $preferencePath (([pscustomobject]@{SchemaVersion = 1; ProfileRoot = $normalizedRoot}) | ConvertTo-Json)
+    Assert-Equal ([IO.Path]::GetFullPath($normalizedRoot)) (Get-DefaultProfileRoot -PreferencePath $preferencePath) 'storage reader normalizes a rooted path without creating it'
+    $badPreferences = @(
+        '{ broken JSON',
+        'null',
+        '[]',
+        '[{"SchemaVersion":1,"ProfileRoot":"D:\\Layouts"}]',
+        '{}',
+        '{"SchemaVersion":1}',
+        '{"ProfileRoot":"D:\\Layouts"}',
+        '{"SchemaVersion":2,"ProfileRoot":"D:\\Layouts"}',
+        '{"SchemaVersion":"1","ProfileRoot":"D:\\Layouts"}',
+        '{"SchemaVersion":1.5,"ProfileRoot":"D:\\Layouts"}',
+        '{"SchemaVersion":1,"ProfileRoot":null}',
+        '{"SchemaVersion":1,"ProfileRoot":42}',
+        '{"SchemaVersion":1,"ProfileRoot":[]}',
+        '{"SchemaVersion":1,"ProfileRoot":""}',
+        '{"SchemaVersion":1,"ProfileRoot":" "}',
+        '{"SchemaVersion":1,"ProfileRoot":"relative\\Layouts"}',
+        '{"SchemaVersion":1,"ProfileRoot":"D:relative"}',
+        '{"SchemaVersion":1,"ProfileRoot":"C:"}',
+        '{"SchemaVersion":1,"ProfileRoot":"\\Layouts"}',
+        '{"SchemaVersion":1,"ProfileRoot":"/var/layouts"}'
+    )
+    # Device path aliases can bypass ordinary desktop-root comparisons. Normalize
+    # slash variants before rejecting them, and retain the preference on failure.
+    foreach ($deviceRoot in @('\\?\C:\data', '\\.\C:\data', '//?/C:/data', '//./C:/data', '\/?\C:/data', '\/.\C:\data')) {
+        $badPreferences += ([pscustomobject]@{SchemaVersion = 1; ProfileRoot = $deviceRoot}) | ConvertTo-Json
+    }
+    foreach ($document in $badPreferences) {
+        Write-Text $preferencePath $document
+        Assert-Throws { Get-DefaultProfileRoot -PreferencePath $preferencePath } 'corrupt or relative storage preferences stop startup'
+        Assert-Equal $document (Read-Text $preferencePath) 'failed storage reads preserve the original preference'
+        Assert-Equal 'previous bootstrap preferences must stay untouched' (Read-Text "$preferencePath.bak") 'failed storage reads preserve the preference backup'
+    }
+    Assert-Equal 2 @(Get-ChildItem -LiteralPath $preferenceArea -Force).Count 'storage preference reads create no migrations or replacement files'
+
+    # Exercise only the entry point's actual preference-resolution guard. The
+    # parameter binder supplies PSBoundParameters exactly as the full script does;
+    # no OS initialization, desktop access, import or application startup runs.
+    $resolutionGuards = @($ast.EndBlock.Statements | Where-Object {
+        $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+        $_.Extent.Text -match 'Get-DefaultProfileRoot'
+    })
+    Assert-Equal 1 $resolutionGuards.Count 'the application has one storage preference resolution guard'
+    $resolveEntryPreference = [scriptblock]::Create("param([string]`$ProfileRoot)`n" + $resolutionGuards[0].Extent.Text + "`n`$ProfileRoot")
+    $defaultProfileReader = (Get-Item -LiteralPath Function:Get-DefaultProfileRoot).ScriptBlock
+    $script:storageReaderCalls = 0
+    $script:storageReaderValue = $customRoot
+    try {
+        function Get-DefaultProfileRoot {
+            $script:storageReaderCalls++
+            return $script:storageReaderValue
+        }
+        $explicitRoot = 'E:\Explicit Profiles\研究'
+        Assert-Equal $explicitRoot (& $resolveEntryPreference -ProfileRoot $explicitRoot) 'an explicit ProfileRoot overrides saved storage preferences'
+        Assert-Equal 0 $script:storageReaderCalls 'an explicit ProfileRoot avoids reading storage preferences'
+        Assert-Equal $customRoot (& $resolveEntryPreference) 'an omitted ProfileRoot uses the saved storage location'
+        Assert-Equal 1 $script:storageReaderCalls 'an omitted ProfileRoot reads storage preferences once'
+    }
+    finally { Set-Item -LiteralPath Function:Get-DefaultProfileRoot -Value $defaultProfileReader }
 
     Select-Fixture 'default'
     $settingsPath = Get-SharedDesktopSettingsPath
@@ -230,6 +324,25 @@ try {
     Assert-True ($profiles -contains 'laboratory' -and $profiles -contains '宿舍') 'only real profile files are listed'
     Assert-True ($profiles -notcontains 'shared-items') 'settings are absent from the profile dropdown'
 
+    # A user may choose the bootstrap preference's parent as the profile root.
+    # Its storage.json must still be excluded from saved layouts; mock the path
+    # so this edge case never reads or changes a real user's bootstrap settings.
+    $storagePathHelper = (Get-Item -LiteralPath Function:Get-StorageSettingsPath).ScriptBlock
+    $script:profileBootstrapFixturePath = Join-Path $script:ProfileRoot 'storage.json'
+    Write-Text $script:profileBootstrapFixturePath (([pscustomobject]@{SchemaVersion = 1; ProfileRoot = $script:ProfileRoot}) | ConvertTo-Json)
+    try {
+        function Get-StorageSettingsPath { return $script:profileBootstrapFixturePath }
+        $bootstrapProfiles = @(Get-SavedProfileNames)
+        Assert-Equal 2 $bootstrapProfiles.Count 'a bootstrap file inside the chosen profile directory is not a layout'
+        Assert-True ($bootstrapProfiles -contains 'laboratory' -and $bootstrapProfiles -contains '宿舍') 'real profiles remain available beside the bootstrap file'
+        Assert-True ($bootstrapProfiles -notcontains 'storage') 'the bootstrap preference is absent from the layout dropdown'
+    }
+    finally {
+        Set-Item -LiteralPath Function:Get-StorageSettingsPath -Value $storagePathHelper
+        [IO.File]::Delete($script:profileBootstrapFixturePath)
+        Remove-Variable -Scope Script -Name profileBootstrapFixturePath
+    }
+
     # A damaged or incompatible settings file must never silently revert to Apps
     # or overwrite the original. A user can repair the retained file deliberately.
     $badDocuments = @(
@@ -282,6 +395,7 @@ try {
     $script:DesktopPath = Join-Path (Join-Path $testRoot 'dialog') 'Desktop'
     $appsDirectory = Join-Path $script:DesktopPath 'Apps'
     [IO.Directory]::CreateDirectory((Join-Path $appsDirectory 'project')) | Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $script:DesktopPath 'Other Research')) | Out-Null
     $projectFile = Join-Path (Join-Path $appsDirectory 'project') 'keep.txt'
     $notesFile = Join-Path $script:DesktopPath 'Notes.txt'
     Write-Text $projectFile 'project content must stay untouched'
@@ -301,7 +415,7 @@ try {
         Assert-True (-not (Test-Path -LiteralPath "$dialogSettingsPath.bak")) 'canceling does not replace or back up settings'
         Assert-Equal 'project content must stay untouched' (Read-Text $projectFile) 'editing exclusions leaves folder contents unchanged'
         Assert-Equal 'desktop notes must stay untouched' (Read-Text $notesFile) 'editing exclusions leaves desktop files unchanged'
-        Assert-Equal 4 @(Get-ChildItem -LiteralPath $script:DesktopPath -Force).Count 'editing exclusions does not move desktop entries'
+        Assert-Equal 5 @(Get-ChildItem -LiteralPath $script:DesktopPath -Force).Count 'editing exclusions does not move desktop entries'
     }
     finally { $owner.Dispose() }
 

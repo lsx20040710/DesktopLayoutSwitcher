@@ -41,14 +41,21 @@ function Read-Preference {
     return [IO.File]::ReadAllText($bootstrap) | ConvertFrom-Json
 }
 function Invoke-TestInstall($ConfigDir, [string]$Label, [switch]$ExpectFailure) {
+    $logPath = Join-Path $fixture ($Label + '.log')
     $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
-        "/DIR=`"$installRoot`"", "/LOG=`"$(Join-Path $fixture ($Label + '.log'))`"")
+        "/DIR=`"$installRoot`"", "/LOG=`"$logPath`"")
     if ($null -ne $ConfigDir) { $arguments += "/CONFIGDIR=`"$ConfigDir`"" }
     $process = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru
     if ($ExpectFailure) {
-        if ($process.ExitCode -eq 0) { throw "Invalid storage selection was accepted: $Label" }
+        if ($process.ExitCode -eq 0) {
+            if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath -Tail 20 | Out-Host }
+            throw "Invalid storage selection was accepted: $Label"
+        }
     }
-    elseif ($process.ExitCode -ne 0) { throw "Silent installation failed ($Label) with exit $($process.ExitCode)." }
+    elseif ($process.ExitCode -ne 0) {
+        if (Test-Path -LiteralPath $logPath) { Get-Content -LiteralPath $logPath -Tail 20 | Out-Host }
+        throw "Silent installation failed ($Label) with exit $($process.ExitCode)."
+    }
 }
 function Assert-PreferenceUnchanged([string]$Expected) {
     if ([IO.File]::ReadAllText($bootstrap) -cne $Expected) { throw 'Installation changed a preference that must remain unchanged.' }

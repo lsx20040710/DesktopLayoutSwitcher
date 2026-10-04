@@ -375,6 +375,14 @@ begin
     end;
   end;
   Result := True;
+  { Values[] expands paths when assigning them. Reject the raw command-line
+    value before the directory page can turn a relative path into an absolute one. }
+  if HasConfigDirOverride and (CanonicalDataPath(InitialConfigDir) = '') then begin
+    Log(CustomMessage('ConfigDirInvalid'));
+    SuppressibleMsgBox(CustomMessage('ConfigDirInvalid'), mbError, MB_OK, IDOK);
+    Result := False;
+    Exit;
+  end;
   if StoragePreferenceError <> '' then begin
     Log(StoragePreferenceError + ' ' + StoragePreference);
     if WizardSilent and not HasConfigDirOverride then begin
@@ -389,7 +397,7 @@ begin
   ConfigDirPage := CreateInputDirPage(wpSelectDir, CustomMessage('ConfigDirTitle'),
     CustomMessage('ConfigDirDescription'), CustomMessage('ConfigDirInfo'), False, '');
   ConfigDirPage.Add(CustomMessage('ConfigDirPrompt'));
-  ConfigDirPage.Values[0] := InitialConfigDir;
+  ConfigDirPage.Edits[0].Text := InitialConfigDir;
   if (StoragePreferenceError <> '') and not HasConfigDirOverride and not WizardSilent then
     MsgBox(StoragePreferenceError, mbError, MB_OK);
 end;
@@ -400,7 +408,7 @@ var
 begin
   Result := True;
   if CurPageID = ConfigDirPage.ID then begin
-    Error := ValidateConfigDir(ConfigDirPage.Values[0], Normalized);
+    Error := ValidateConfigDir(ConfigDirPage.Edits[0].Text, Normalized);
     if Error <> '' then begin
       SuppressibleMsgBox(Error, mbError, MB_OK, IDOK);
       Result := False;
@@ -412,7 +420,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): string;
 var
   Normalized, Probe: string;
 begin
-  Result := ValidateConfigDir(ConfigDirPage.Values[0], Normalized);
+  Result := ValidateConfigDir(ConfigDirPage.Edits[0].Text, Normalized);
   if Result <> '' then Exit;
   ConfigDirPage.Values[0] := Normalized;
   if not ForceDirectories(Normalized) then begin

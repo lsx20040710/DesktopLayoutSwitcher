@@ -29,10 +29,18 @@ foreach ($name in ($programFiles + @('build/Launcher.cs', 'build/installer.iss',
 # prevent Add-Type definitions and module test state from leaking between checks.
 $powershell = Join-Path $PSHOME 'powershell.exe'
 $checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1')
+$failedChecks = @()
 foreach ($check in $checks) {
-    & $powershell -STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $repository $check)
-    if ($LASTEXITCODE -ne 0) { throw "Verification failed: $check (exit $LASTEXITCODE)." }
+    Write-Host "Running $check"
+    try {
+        & $powershell -STA -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $repository $check)
+        if ($LASTEXITCODE -ne 0) { $failedChecks += "$check (exit $LASTEXITCODE)" }
+    }
+    catch {
+        $failedChecks += "${check}: $($_.Exception.Message)"
+    }
 }
+if ($failedChecks.Count -gt 0) { throw ("Verification failed after all checks ran:`n" + ($failedChecks -join "`n")) }
 
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'The .NET Framework 4.x C# compiler was not found.' }

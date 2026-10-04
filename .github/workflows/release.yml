@@ -41,10 +41,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1')
+          $failedChecks = @()
           foreach ($check in $checks) {
-            & (Join-Path $PSHOME 'pwsh.exe') -STA -NoProfile -NonInteractive -File $check
-            if ($LASTEXITCODE -ne 0) { throw "Verification failed: $check (exit $LASTEXITCODE)." }
+            Write-Host "Running $check"
+            try {
+              & (Join-Path $PSHOME 'pwsh.exe') -STA -NoProfile -NonInteractive -File $check
+              if ($LASTEXITCODE -ne 0) { $failedChecks += "$check (exit $LASTEXITCODE)" }
+            }
+            catch {
+              $failedChecks += "${check}: $($_.Exception.Message)"
+            }
           }
+          if ($failedChecks.Count -gt 0) { throw ("Verification failed after all checks ran:`n" + ($failedChecks -join "`n")) }
 
   release:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

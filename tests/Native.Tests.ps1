@@ -42,7 +42,8 @@ Add-Type -TypeDefinition $nativeSource
 $manager = [DesktopLayout.DesktopIconManager]
 $binding = [System.Reflection.BindingFlags]'NonPublic,Static'
 $itemType = $manager.GetNestedType('LVITEM', [System.Reflection.BindingFlags]::NonPublic)
-if ([System.Runtime.InteropServices.Marshal]::SizeOf($itemType) -ne 88 -or
+$itemInstance = [System.Activator]::CreateInstance($itemType)
+if ([System.Runtime.InteropServices.Marshal]::SizeOf($itemInstance) -ne 88 -or
     [System.Runtime.InteropServices.Marshal]::OffsetOf($itemType, 'pszText').ToInt64() -ne 24) {
     throw 'LVITEMW does not match the 64-bit Windows ABI.'
 }

@@ -1,0 +1,413 @@
+﻿{
+    "SchemaVersion":  1,
+    "SavedAt":  "2026-09-02 10:38:35",
+    "Profile":  "实验室布局",
+    "Screens":  [
+                    {
+                        "DeviceName":  "\\\\.\\DISPLAY1",
+                        "Primary":  false,
+                        "Bounds":  {
+                                       "X":  -2048,
+                                       "Y":  0,
+                                       "Width":  1707,
+                                       "Height":  1067
+                                   },
+                        "WorkingArea":  {
+                                            "X":  -2048,
+                                            "Y":  0,
+                                            "Width":  1707,
+                                            "Height":  1067
+                                        }
+                    },
+                    {
+                        "DeviceName":  "\\\\.\\DISPLAY5",
+                        "Primary":  true,
+                        "Bounds":  {
+                                       "X":  0,
+                                       "Y":  0,
+                                       "Width":  2048,
+                                       "Height":  1152
+                                   },
+                        "WorkingArea":  {
+                                            "X":  0,
+                                            "Y":  0,
+                                            "Width":  2048,
+                                            "Height":  1104
+                                        }
+                    }
+                ],
+    "DesktopIcons":  [
+                         {
+                             "Text":  "此电脑",
+                             "Index":  0,
+                             "X":  2576,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "控制面板",
+                             "Index":  1,
+                             "X":  2576,
+                             "Y":  127
+                         },
+                         {
+                             "Text":  "回收站",
+                             "Index":  2,
+                             "X":  2576,
+                             "Y":  252
+                         },
+                         {
+                             "Text":  "微信",
+                             "Index":  3,
+                             "X":  2576,
+                             "Y":  377
+                         },
+                         {
+                             "Text":  "QQ",
+                             "Index":  4,
+                             "X":  2576,
+                             "Y":  502
+                         },
+                         {
+                             "Text":  "腾讯会议",
+                             "Index":  5,
+                             "X":  2576,
+                             "Y":  627
+                         },
+                         {
+                             "Text":  "哔哩哔哩",
+                             "Index":  6,
+                             "X":  2855,
+                             "Y":  627
+                         },
+                         {
+                             "Text":  "百度网盘",
+                             "Index":  7,
+                             "X":  2576,
+                             "Y":  1002
+                         },
+                         {
+                             "Text":  "饮食与体重记录助手",
+                             "Index":  8,
+                             "X":  2948,
+                             "Y":  252
+                         },
+                         {
+                             "Text":  "NVIDIA App",
+                             "Index":  9,
+                             "X":  2948,
+                             "Y":  127
+                         },
+                         {
+                             "Text":  "联想百应",
+                             "Index":  10,
+                             "X":  2948,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "VMware Workstation Pro",
+                             "Index":  11,
+                             "X":  2669,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "SOLIDWORKS Design 2026",
+                             "Index":  12,
+                             "X":  2669,
+                             "Y":  752
+                         },
+                         {
+                             "Text":  "向日葵远程控制",
+                             "Index":  13,
+                             "X":  2669,
+                             "Y":  627
+                         },
+                         {
+                             "Text":  "QuicDesk",
+                             "Index":  14,
+                             "X":  2669,
+                             "Y":  502
+                         },
+                         {
+                             "Text":  "SimpleTex",
+                             "Index":  15,
+                             "X":  2762,
+                             "Y":  252
+                         },
+                         {
+                             "Text":  "Anycubic Slicer Next",
+                             "Index":  16,
+                             "X":  2669,
+                             "Y":  877
+                         },
+                         {
+                             "Text":  "飞书",
+                             "Index":  17,
+                             "X":  2576,
+                             "Y":  752
+                         },
+                         {
+                             "Text":  "Zotero",
+                             "Index":  18,
+                             "X":  2762,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "Study_for_robot",
+                             "Index":  19,
+                             "X":  2762,
+                             "Y":  377
+                         },
+                         {
+                             "Text":  "sw文件",
+                             "Index":  20,
+                             "X":  2669,
+                             "Y":  1002
+                         },
+                         {
+                             "Text":  "TEST",
+                             "Index":  21,
+                             "X":  2762,
+                             "Y":  627
+                         },
+                         {
+                             "Text":  "钉钉",
+                             "Index":  22,
+                             "X":  2576,
+                             "Y":  877
+                         },
+                         {
+                             "Text":  "lsx",
+                             "Index":  23,
+                             "X":  2762,
+                             "Y":  877
+                         },
+                         {
+                             "Text":  "QQ音乐",
+                             "Index":  24,
+                             "X":  2855,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "AudioVisual",
+                             "Index":  25,
+                             "X":  2855,
+                             "Y":  127
+                         },
+                         {
+                             "Text":  "VLC media player",
+                             "Index":  26,
+                             "X":  2855,
+                             "Y":  252
+                         },
+                         {
+                             "Text":  "Raspberry Pi Imager",
+                             "Index":  27,
+                             "X":  2855,
+                             "Y":  377
+                         },
+                         {
+                             "Text":  "抖音",
+                             "Index":  28,
+                             "X":  2855,
+                             "Y":  502
+                         },
+                         {
+                             "Text":  "Apps",
+                             "Index":  29,
+                             "X":  2762,
+                             "Y":  502
+                         },
+                         {
+                             "Text":  "QGroundControl",
+                             "Index":  30,
+                             "X":  2669,
+                             "Y":  127
+                         },
+                         {
+                             "Text":  "61采购.xlsx",
+                             "Index":  31,
+                             "X":  4808,
+                             "Y":  252
+                         },
+                         {
+                             "Text":  "111.txt",
+                             "Index":  32,
+                             "X":  3413,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "降AIGC提示词.txt",
+                             "Index":  33,
+                             "X":  3506,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "各种问题之后整理.txt",
+                             "Index":  34,
+                             "X":  3320,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "哈工程VPN",
+                             "Index":  35,
+                             "X":  4250,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "学生入口-哈尔滨工程大学",
+                             "Index":  36,
+                             "X":  4343,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "学习计划.md",
+                             "Index":  37,
+                             "X":  3599,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "GitHub Desktop",
+                             "Index":  38,
+                             "X":  4436,
+                             "Y":  2
+                         },
+                         {
+                             "Text":  "WeGame",
+                             "Index":  39,
+                             "X":  4808,
+                             "Y":  1002
+                         },
+                         {
+                             "Text":  "Steam",
+                             "Index":  40,
+                             "X":  4901,
+                             "Y":  1002
+                         },
+                         {
+                             "Text":  "他人文件",
+                             "Index":  41,
+                             "X":  4901,
+                             "Y":  1127
+                         },
+                         {
+                             "Text":  "主席到访.mp4",
+                             "Index":  42,
+                             "X":  4901,
+                             "Y":  1252
+                         },
+                         {
+                             "Text":  "如何使用xxx",
+                             "Index":  43,
+                             "X":  2762,
+                             "Y":  752
+                         },
+                         {
+                             "Text":  "爱奇艺",
+                             "Index":  44,
+                             "X":  2855,
+                             "Y":  752
+                         },
+                         {
+                             "Text":  "balenaEtcher",
+                             "Index":  45,
+                             "X":  2669,
+                             "Y":  252
+                         },
+                         {
+                             "Text":  "我",
+                             "Index":  46,
+                             "X":  4808,
+                             "Y":  1127
+                         },
+                         {
+                             "Text":  "论文",
+                             "Index":  47,
+                             "X":  2762,
+                             "Y":  127
+                         },
+                         {
+                             "Text":  "Cockpit",
+                             "Index":  48,
+                             "X":  2669,
+                             "Y":  377
+                         },
+                         {
+                             "Text":  "哈尔滨工程大学PPT模板",
+                             "Index":  49,
+                             "X":  4994,
+                             "Y":  1127
+                         },
+                         {
+                             "Text":  "Flash中心",
+                             "Index":  50,
+                             "X":  4994,
+                             "Y":  1002
+                         },
+                         {
+                             "Text":  "工具软件",
+                             "Index":  51,
+                             "X":  4808,
+                             "Y":  1252
+                         },
+                         {
+                             "Text":  "备忘录.txt",
+                             "Index":  52,
+                             "X":  3227,
+                             "Y":  2
+                         }
+                     ],
+    "Windows":  [
+                    {
+                        "HWnd":  329100,
+                        "ProcessId":  5904,
+                        "ProcessName":  "powershell",
+                        "ProcessPath":  "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                        "Title":  "桌面布局切换工具",
+                        "ClassName":  "WindowsForms10.Window.8.app.0.1ba5890_r13_ad1",
+                        "Left":  644,
+                        "Top":  282,
+                        "Right":  1404,
+                        "Bottom":  822,
+                        "ShowCmd":  1
+                    },
+                    {
+                        "HWnd":  919092,
+                        "ProcessId":  15892,
+                        "ProcessName":  "explorer",
+                        "ProcessPath":  "C:\\Windows\\Explorer.EXE",
+                        "Title":  "工具软件 - 文件资源管理器",
+                        "ClassName":  "CabinetWClass",
+                        "Left":  -2048,
+                        "Top":  0,
+                        "Right":  -341,
+                        "Bottom":  1067,
+                        "ShowCmd":  1
+                    },
+                    {
+                        "HWnd":  66266,
+                        "ProcessId":  17384,
+                        "ProcessName":  "NVIDIA Overlay",
+                        "ProcessPath":  "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\CEF\\NVIDIA Overlay.exe",
+                        "Title":  "NVIDIA GeForce Overlay",
+                        "ClassName":  "CEF-OSC-WIDGET",
+                        "Left":  0,
+                        "Top":  0,
+                        "Right":  2047,
+                        "Bottom":  1152,
+                        "ShowCmd":  1
+                    },
+                    {
+                        "HWnd":  1049550,
+                        "ProcessId":  5920,
+                        "ProcessName":  "WindowsTerminal",
+                        "ProcessPath":  "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.24.11911.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe",
+                        "Title":  "桌面布局切换工具",
+                        "ClassName":  "CASCADIA_HOSTING_WINDOW_CLASS",
+                        "Left":  249,
+                        "Top":  256,
+                        "Right":  1448,
+                        "Bottom":  872,
+                        "ShowCmd":  2
+                    }
+                ]
+}

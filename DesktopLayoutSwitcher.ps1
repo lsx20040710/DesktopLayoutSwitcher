@@ -1,18 +1,33 @@
 ﻿param(
     # 操作类型：Gui 打开图形界面，Save 保存当前布局，Restore 恢复已保存布局，Status 查看当前状态。
-    [ValidateSet('Gui', 'Save', 'Restore', 'Status')]
+    [ValidateSet('Gui', 'Save', 'Restore', 'Status', 'Recover')]
     [string]$Action = 'Gui',
 
     # 配置名称：保存和恢复时使用，可在图形界面里自定义。
     [ValidatePattern('^[\p{L}\p{N}_ -]+$')]
     [string]$Profile = 'default',
 
-    # 配置文件目录：默认放在脚本旁边，方便整个文件夹直接移动。
-    [string]$ProfileRoot = (Join-Path $PSScriptRoot 'profiles')
+    # 用户数据独立于程序目录，安装和升级不会覆盖已有场景。
+    [string]$ProfileRoot = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'DesktopLayoutSwitcher\profiles'),
+
+    # 兼容旧版：只恢复图标和窗口的位置，不切换桌面项目。
+    [switch]$PositionOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    throw '本工具仅支持 Windows 10 / 11。'
+}
+if (-not [Environment]::Is64BitProcess) {
+    throw '请使用 64 位 Windows PowerShell 或安装版启动器运行本工具。'
+}
+
+$ProfileRoot = [IO.Path]::GetFullPath($ProfileRoot)
+$script:DataRoot = Join-Path $ProfileRoot 'data'
+$script:DesktopPath = [Environment]::GetFolderPath('DesktopDirectory')
+Import-Module (Join-Path $PSScriptRoot 'DesktopItems.psm1') -Force
 
 # 加载 WinForms 和 Drawing，用于读取显示器信息并创建本地小窗口。
 Add-Type -AssemblyName System.Windows.Forms
@@ -84,6 +99,11 @@ namespace DesktopLayout
         private const int LVM_REDRAWITEMS = LVM_FIRST + 21;
         private const int LVM_GETITEMTEXTW = LVM_FIRST + 115;
         private const uint LVIF_TEXT = 0x0001;
+        private const int GWL_STYLE = -16;
+        private const long LVS_AUTOARRANGE = 0x0100;
+        private const uint SHCNE_UPDATEDIR = 0x00001000;
+        private const uint SHCNF_PATHW = 0x0005;
+        private const uint SHCNF_FLUSHNOWAIT = 0x2000;
 
         private const uint PROCESS_VM_OPERATION = 0x0008;
         private const uint PROCESS_VM_READ = 0x0010;
@@ -113,6 +133,12 @@ namespace DesktopLayout
             public int cchTextMax;
             public int iImage;
             public IntPtr lParam;
+            public int iIndent;
+            public int iGroupId;
+            public uint cColumns;
+            public IntPtr puColumns;
+            public IntPtr piColFmt;
+            public int iGroup;
         }
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -128,6 +154,12 @@ namespace DesktopLayout
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern void SHChangeNotify(uint wEventId, uint uFlags, string dwItem1, IntPtr dwItem2);
 
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -156,18 +188,76 @@ namespace DesktopLayout
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, int nSize, out IntPtr lpNumberOfBytesWritten);
 
-        public static List<DesktopIconSnapshot> Capture()
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
+
+        // 在移动桌面文件之前调用，确保位置可以恢复，避免切换后才发现自动排列等问题。
+        public static void ValidateRestore()
         {
             IntPtr listView = GetDesktopListView();
-            int count = SendMessage(listView, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            IntPtr process = OpenExplorerProcess(listView);
+            try
+            {
+                if ((GetWindowLongPtr(listView, GWL_STYLE).ToInt64() & LVS_AUTOARRANGE) != 0)
+                {
+                    throw new InvalidOperationException("请先右键桌面，在“查看”中取消“自动排列图标”，再恢复布局。");
+                }
+            }
+            finally
+            {
+                CloseHandle(process);
+            }
+        }
+
+        // Shell 通知是异步的；调用者应有限重试 Capture，等待 Explorer 完成新项目枚举。
+        public static void NotifyDesktopChanged()
+        {
+            NotifyDesktopDirectory(Environment.SpecialFolder.DesktopDirectory);
+            NotifyDesktopDirectory(Environment.SpecialFolder.CommonDesktopDirectory);
+        }
+
+        private static void NotifyDesktopDirectory(Environment.SpecialFolder folder)
+        {
+            string path = Environment.GetFolderPath(folder);
+            if (!string.IsNullOrEmpty(path))
+            {
+                SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, path, IntPtr.Zero);
+            }
+        }
+
+        private static IntPtr OpenExplorerProcess(IntPtr listView)
+        {
+            if (!Environment.Is64BitProcess)
+            {
+                throw new InvalidOperationException("请使用 64 位 PowerShell 启动此工具；32 位进程无法安全读取 Explorer 桌面图标。");
+            }
+
             uint processId;
-            GetWindowThreadProcessId(listView, out processId);
+            if (GetWindowThreadProcessId(listView, out processId) == 0 || processId == 0)
+            {
+                throw new InvalidOperationException("Explorer 桌面窗口已失效，请等待桌面加载完成后重试。");
+            }
 
             IntPtr process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, false, processId);
             if (process == IntPtr.Zero)
             {
-                throw new InvalidOperationException("无法打开 Explorer 进程，桌面图标位置读取失败。");
+                throw new InvalidOperationException("无法访问 Explorer 进程，桌面图标位置读取失败。");
             }
+
+            bool wow64;
+            if (!IsWow64Process(process, out wow64) || wow64)
+            {
+                CloseHandle(process);
+                throw new InvalidOperationException("无法确认 Explorer 使用 64 位指针布局，已停止跨进程读写以保护桌面。");
+            }
+            return process;
+        }
+
+        public static List<DesktopIconSnapshot> Capture()
+        {
+            IntPtr listView = GetDesktopListView();
+            int count = SendMessage(listView, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+            IntPtr process = OpenExplorerProcess(listView);
 
             IntPtr remoteText = IntPtr.Zero;
             IntPtr remoteItem = IntPtr.Zero;
@@ -216,28 +306,26 @@ namespace DesktopLayout
 
         public static void Restore(IEnumerable<DesktopIconSnapshot> savedIcons)
         {
-            IntPtr listView = GetDesktopListView();
+            ValidateRestore();
+            var saved = new List<DesktopIconSnapshot>(savedIcons);
             var current = Capture();
-            var indexByText = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var indices = MatchIconIndices(saved, current);
+            IntPtr listView = GetDesktopListView();
 
-            foreach (var item in current)
+            for (int i = 0; i < saved.Count; i++)
             {
-                if (!indexByText.ContainsKey(item.Text))
-                {
-                    indexByText[item.Text] = item.Index;
-                }
-            }
-
-            foreach (var item in savedIcons)
-            {
-                int index;
-                if (!indexByText.TryGetValue(item.Text, out index))
+                int index = indices[i];
+                if (index < 0)
                 {
                     continue;
                 }
 
+                var item = saved[i];
                 // LVM_SETITEMPOSITION 只需要当前索引和目标坐标，坐标超出屏幕时由 Explorer 自己裁剪。
-                SendMessage(listView, LVM_SETITEMPOSITION, (IntPtr)index, MakeLParam(item.X, item.Y));
+                if (SendMessage(listView, LVM_SETITEMPOSITION, (IntPtr)index, MakeLParam(item.X, item.Y)) == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException("Explorer 未能恢复图标位置，请等待桌面刷新后重试。");
+                }
             }
 
             int count = SendMessage(listView, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
@@ -248,6 +336,31 @@ namespace DesktopLayout
 
             InvalidateRect(listView, IntPtr.Zero, true);
             UpdateWindow(listView);
+        }
+
+        // 同显示名按枚举顺序配对，保证每个当前图标只使用一次，防止全部位置写到第一个同名图标。
+        private static List<int> MatchIconIndices(IEnumerable<DesktopIconSnapshot> savedIcons, IEnumerable<DesktopIconSnapshot> currentIcons)
+        {
+            var indexByText = new Dictionary<string, Queue<int>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in currentIcons)
+            {
+                string text = item.Text ?? "";
+                Queue<int> indices;
+                if (!indexByText.TryGetValue(text, out indices))
+                {
+                    indices = new Queue<int>();
+                    indexByText.Add(text, indices);
+                }
+                indices.Enqueue(item.Index);
+            }
+
+            var result = new List<int>();
+            foreach (var item in savedIcons)
+            {
+                Queue<int> indices;
+                result.Add(indexByText.TryGetValue(item.Text ?? "", out indices) && indices.Count > 0 ? indices.Dequeue() : -1);
+            }
+            return result;
         }
 
         private static string ReadIconText(IntPtr listView, IntPtr process, IntPtr remoteItem, IntPtr remoteText, int textBytes, int index)
@@ -263,12 +376,18 @@ namespace DesktopLayout
 
             byte[] itemBuffer = StructureToBytes(item);
             IntPtr written;
-            WriteProcessMemory(process, remoteItem, itemBuffer, itemBuffer.Length, out written);
+            if (!WriteProcessMemory(process, remoteItem, itemBuffer, itemBuffer.Length, out written) || written.ToInt64() != itemBuffer.Length)
+            {
+                throw new InvalidOperationException("写入 Explorer 临时内存失败，已停止读取桌面布局。");
+            }
             SendMessage(listView, LVM_GETITEMTEXTW, (IntPtr)index, remoteItem);
 
             byte[] textBuffer = new byte[textBytes];
             IntPtr read;
-            ReadProcessMemory(process, remoteText, textBuffer, textBuffer.Length, out read);
+            if (!ReadProcessMemory(process, remoteText, textBuffer, textBuffer.Length, out read) || read.ToInt64() != textBuffer.Length)
+            {
+                throw new InvalidOperationException("读取 Explorer 图标名称失败，已停止保存布局。");
+            }
 
             int charCount = 0;
             while (charCount < textBytes / 2)
@@ -286,11 +405,17 @@ namespace DesktopLayout
 
         private static POINT ReadIconPoint(IntPtr listView, IntPtr process, IntPtr remotePoint, int index)
         {
-            SendMessage(listView, LVM_GETITEMPOSITION, (IntPtr)index, remotePoint);
+            if (SendMessage(listView, LVM_GETITEMPOSITION, (IntPtr)index, remotePoint) == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Explorer 桌面项目正在变化，请等待桌面刷新完成后重试。");
+            }
             int size = Marshal.SizeOf(typeof(POINT));
             byte[] pointBuffer = new byte[size];
             IntPtr read;
-            ReadProcessMemory(process, remotePoint, pointBuffer, pointBuffer.Length, out read);
+            if (!ReadProcessMemory(process, remotePoint, pointBuffer, pointBuffer.Length, out read) || read.ToInt64() != pointBuffer.Length)
+            {
+                throw new InvalidOperationException("读取 Explorer 图标坐标失败，已停止保存布局。");
+            }
             return BytesToStructure<POINT>(pointBuffer);
         }
 
@@ -319,6 +444,11 @@ namespace DesktopLayout
             }
 
             IntPtr listView = FindWindowEx(defView, IntPtr.Zero, "SysListView32", "FolderView");
+            if (listView == IntPtr.Zero)
+            {
+                // 部分 Explorer 版本或语言环境使用不同的窗口标题。
+                listView = FindWindowEx(defView, IntPtr.Zero, "SysListView32", null);
+            }
             if (listView == IntPtr.Zero)
             {
                 throw new InvalidOperationException("找不到桌面图标 SysListView32 控件。");
@@ -535,7 +665,7 @@ namespace DesktopLayout
                     continue;
                 }
 
-                bool samePath = SameText(saved.ProcessPath, item.ProcessPath);
+                bool samePath = !string.IsNullOrWhiteSpace(saved.ProcessPath) && SameText(saved.ProcessPath, item.ProcessPath);
                 bool sameProcess = SameText(saved.ProcessName, item.ProcessName);
                 bool sameClass = SameText(saved.ClassName, item.ClassName);
                 bool sameTitle = SameText(saved.Title, item.Title);
@@ -628,6 +758,62 @@ function Assert-ProfileName {
     if ($Name -notmatch '^[\p{L}\p{N}_ -]+$') {
         throw '配置名只能包含中文、英文、数字、空格、横线和下划线。'
     }
+    if ($Name.Length -gt 80 -or $Name -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        throw '配置名过长或为 Windows 保留名称，请换一个名称。'
+    }
+}
+
+function Write-LayoutJson {
+    param([string]$Path, [object]$Value)
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($true))
+        if ([IO.File]::Exists($Path)) {
+            [IO.File]::Replace($temporary, $Path, "$Path.bak", $true)
+        }
+        else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    }
+    finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+}
+
+function Get-SharedDesktopNames {
+    # 工具入口和正在运行的程序/配置目录在所有场景中保留。
+    $names = [Collections.Generic.List[string]]::new()
+    foreach ($name in @('DesktopLayoutSwitcher.lnk', '桌面布局切换工具.lnk', '启动桌面布局工具.cmd')) {
+        $names.Add($name)
+    }
+    $prefix = $script:DesktopPath.TrimEnd('\') + '\'
+    foreach ($folder in @($PSScriptRoot, $ProfileRoot)) {
+        $full = [IO.Path]::GetFullPath($folder)
+        if ($full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $names.Add($full.Substring($prefix.Length).Split('\')[0])
+        }
+        elseif ($full.TrimEnd('\') -eq $script:DesktopPath.TrimEnd('\')) {
+            foreach ($file in @('DesktopLayoutSwitcher.exe', 'DesktopLayoutSwitcher.ps1', 'DesktopItems.psm1', 'README.md', 'VERSION', 'profiles')) {
+                $names.Add($file)
+            }
+        }
+    }
+    return $names.ToArray()
+}
+
+function Initialize-LayoutStorage {
+    New-Item -ItemType Directory -Path $ProfileRoot -Force | Out-Null
+    # 直接运行旧项目时自动迁移其位置配置；不复制个人文件或快捷方式。
+    $legacyRoot = Join-Path $PSScriptRoot 'profiles'
+    if ($legacyRoot -ne $ProfileRoot -and (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $legacyRoot -Filter '*.json' -File)) {
+            $target = Join-Path $ProfileRoot $file.Name
+            if (-not (Test-Path -LiteralPath $target)) {
+                Copy-Item -LiteralPath $file.FullName -Destination $target
+            }
+        }
+    }
+    Repair-DesktopItemsTransaction -DataRoot $script:DataRoot | Out-Null
 }
 
 function Get-SavedProfileNames {
@@ -705,25 +891,28 @@ function New-WindowList {
 function Save-LayoutProfile {
     param([string]$Name)
 
+    $path = Get-ProfilePath -Name $Name
     New-Item -ItemType Directory -Path $ProfileRoot -Force | Out-Null
 
     $snapshot = [pscustomobject]@{
-        SchemaVersion = 1
+        SchemaVersion = 2
         SavedAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
         Profile = $Name
         Screens = @(Get-ScreenSnapshot)
         DesktopIcons = @([DesktopLayout.DesktopIconManager]::Capture())
         Windows = @([DesktopLayout.WindowManager]::Capture())
+        DesktopItems = $null
     }
 
-    $path = Get-ProfilePath -Name $Name
-    $snapshot | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
+    $snapshot.DesktopItems = Save-DesktopItemsSnapshot -DesktopPath $script:DesktopPath -DataRoot $script:DataRoot -SharedNames (Get-SharedDesktopNames)
+    Write-LayoutJson -Path $path -Value $snapshot
     Write-Host "已保存布局：$Name -> $path"
     Write-Host "桌面图标：$($snapshot.DesktopIcons.Count) 个；窗口：$($snapshot.Windows.Count) 个。"
+    Write-Host "场景桌面项目：$(@($snapshot.DesktopItems.Items).Count) 个。"
 }
 
 function Restore-LayoutProfile {
-    param([string]$Name)
+    param([string]$Name, [switch]$OnlyPositions)
 
     $path = Get-ProfilePath -Name $Name
     if (-not (Test-Path -LiteralPath $path)) {
@@ -731,6 +920,25 @@ function Restore-LayoutProfile {
     }
 
     $snapshot = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $hasItems = $null -ne $snapshot.PSObject.Properties['DesktopItems'] -and $null -ne $snapshot.DesktopItems
+    # 必须在移动文件前确认 Explorer 可恢复位置，避免切换到一半才发现自动排列。
+    [DesktopLayout.DesktopIconManager]::ValidateRestore()
+    if ($hasItems -and -not $OnlyPositions) {
+        $result = Restore-DesktopItemsSnapshot -DesktopPath $script:DesktopPath -DataRoot $script:DataRoot -Snapshot $snapshot.DesktopItems -SharedNames (Get-SharedDesktopNames)
+        [DesktopLayout.DesktopIconManager]::NotifyDesktopChanged()
+        # Explorer 异步枚举刚移回的文件，有限等待后再恢复图标位置。
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $current = @([DesktopLayout.DesktopIconManager]::Capture())
+            $currentNames = @($current | ForEach-Object { $_.Text })
+            $missing = @($snapshot.DesktopIcons | Where-Object { $_.Text -notin $currentNames })
+            if ($missing.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 150
+        }
+        Write-Host ($result | ConvertTo-Json -Compress)
+    }
+    elseif (-not $hasItems) {
+        Write-Warning '这是旧版位置配置。本次只恢复位置；请重新保存一次，以启用桌面项目补齐与收纳。'
+    }
     [DesktopLayout.DesktopIconManager]::Restore((New-IconList -Items @($snapshot.DesktopIcons)))
     Start-Sleep -Milliseconds 200
     [DesktopLayout.WindowManager]::Restore((New-WindowList -Items @($snapshot.Windows)))
@@ -739,9 +947,19 @@ function Restore-LayoutProfile {
     Write-Host "来源文件：$path"
 }
 
+function Recover-DesktopItems {
+    Restore-AllDesktopItems -DesktopPath $script:DesktopPath -DataRoot $script:DataRoot -SharedNames (Get-SharedDesktopNames) | Out-Host
+    [DesktopLayout.DesktopIconManager]::NotifyDesktopChanged()
+}
+
 function Get-LayoutStatusText {
     # 将状态组装成文本，命令行和图形界面共用这一份状态逻辑。
     $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("配置目录：$ProfileRoot")
+    $lines.Add("用户桌面：$script:DesktopPath")
+    $lines.Add('切换场景会收纳多余项目、补齐缺少项目；取回收纳项目可恢复全部。')
+    $lines.Add('修改场景后请保存；公共桌面项目、系统图标和工具入口为所有场景共有。')
+    $lines.Add('')
     $lines.Add("当前显示器：")
 
     foreach ($screen in @(Get-ScreenSnapshot)) {
@@ -791,7 +1009,7 @@ function Show-LayoutToolWindow {
     $form.Controls.Add($title)
 
     $hint = [System.Windows.Forms.Label]::new()
-    $hint.Text = '输入配置名保存当前布局；恢复时从已保存配置里选择。'
+    $hint.Text = "每个场景分别记住项目和位置。整理后保存；切换时自动补齐和收纳。`r`n修改场景后请再次保存；旧配置重新保存一次后启用新功能。"
     $hint.AutoSize = $true
     $hint.Location = [System.Drawing.Point]::new(20, 52)
     $form.Controls.Add($hint)
@@ -847,12 +1065,19 @@ function Show-LayoutToolWindow {
     $toolTip = [System.Windows.Forms.ToolTip]::new()
     $toolTip.SetToolTip($refreshButton, '重新读取显示器信息和已保存配置列表，不会改变桌面布局。')
 
+    $positionsCheck = [System.Windows.Forms.CheckBox]::new()
+    $positionsCheck.Text = '仅恢复位置（不切换桌面项目）'
+    $positionsCheck.Checked = $PositionOnly.IsPresent
+    $positionsCheck.AutoSize = $true
+    $positionsCheck.Location = [System.Drawing.Point]::new(350, 174)
+    $form.Controls.Add($positionsCheck)
+
     $statusBox = [System.Windows.Forms.TextBox]::new()
     $statusBox.Multiline = $true
     $statusBox.ReadOnly = $true
     $statusBox.ScrollBars = 'Vertical'
-    $statusBox.Location = [System.Drawing.Point]::new(20, 190)
-    $statusBox.Size = [System.Drawing.Size]::new(700, 250)
+    $statusBox.Location = [System.Drawing.Point]::new(20, 203)
+    $statusBox.Size = [System.Drawing.Size]::new(700, 220)
     $statusBox.Anchor = 'Top,Bottom,Left,Right'
     $statusBox.Font = [System.Drawing.Font]::new('Consolas', 9)
     $form.Controls.Add($statusBox)
@@ -860,7 +1085,7 @@ function Show-LayoutToolWindow {
     $statusLabel = [System.Windows.Forms.Label]::new()
     $statusLabel.Text = '状态：等待操作'
     $statusLabel.AutoSize = $true
-    $statusLabel.Location = [System.Drawing.Point]::new(20, 460)
+    $statusLabel.Location = [System.Drawing.Point]::new(20, 430)
     $statusLabel.Anchor = 'Bottom,Left'
     $form.Controls.Add($statusLabel)
 
@@ -870,6 +1095,14 @@ function Show-LayoutToolWindow {
     $openFolderButton.Size = [System.Drawing.Size]::new(105, 30)
     $openFolderButton.Anchor = 'Bottom,Right'
     $form.Controls.Add($openFolderButton)
+
+    $recoverButton = [System.Windows.Forms.Button]::new()
+    $recoverButton.Text = '取回收纳项目'
+    $recoverButton.Location = [System.Drawing.Point]::new(350, 455)
+    $recoverButton.Size = [System.Drawing.Size]::new(140, 30)
+    $recoverButton.Anchor = 'Bottom,Right'
+    $form.Controls.Add($recoverButton)
+    $toolTip.SetToolTip($recoverButton, '把工具收纳的项目全部移回桌面。同名冲突会提示，不会覆盖现有文件。')
 
     $exitButton = [System.Windows.Forms.Button]::new()
     $exitButton.Text = '退出'
@@ -983,7 +1216,7 @@ function Show-LayoutToolWindow {
         try {
             $name = Get-SelectedProfileName
             Invoke-LayoutUiAction -RunningText "正在恢复配置：$name" -DoneText "配置已恢复：$name" -SelectedName $name -Work {
-                Restore-LayoutProfile -Name $name
+                Restore-LayoutProfile -Name $name -OnlyPositions:$positionsCheck.Checked
             }
         }
         catch {
@@ -1015,6 +1248,12 @@ function Show-LayoutToolWindow {
         Invoke-LayoutUiAction -RunningText '正在刷新列表' -DoneText '列表已刷新' -SelectedName ([string]$profileCombo.SelectedItem) -Work { }
     })
 
+    $recoverButton.Add_Click({
+        Invoke-LayoutUiAction -RunningText '正在取回收纳项目' -DoneText '收纳项目已取回' -SelectedName ([string]$profileCombo.SelectedItem) -Work {
+            Recover-DesktopItems
+        }
+    })
+
     $openFolderButton.Add_Click({
         # 配置目录不存在时先创建，避免 Explorer 打开失败。
         New-Item -ItemType Directory -Path $ProfileRoot -Force | Out-Null
@@ -1023,20 +1262,44 @@ function Show-LayoutToolWindow {
 
     $exitButton.Add_Click({ $form.Close() })
     $form.Add_Shown({
-        [DesktopLayout.NativeWindowTools]::ShowAndActivate($form.Handle)
-        Refresh-UiState -SelectedName ''
+        try {
+            [DesktopLayout.NativeWindowTools]::ShowAndActivate($form.Handle)
+            Refresh-UiState -SelectedName ''
+        }
+        catch { Show-LayoutUiError -ErrorRecord $_ }
     })
     [void]$form.ShowDialog()
 }
 
-switch ($Action) {
-    'Gui' { Show-LayoutToolWindow }
-    'Save' { Save-LayoutProfile -Name $Profile }
-    'Restore' { Restore-LayoutProfile -Name $Profile }
-    'Status' { Show-LayoutStatus }
+# 同一配置目录只允许一个界面/命令操作，覆盖完整的模块与布局写入过程。
+$rootHash = [Security.Cryptography.SHA256]::Create()
+try {
+    $mutexId = [BitConverter]::ToString($rootHash.ComputeHash([Text.Encoding]::UTF8.GetBytes($ProfileRoot.ToUpperInvariant()))).Replace('-', '')
 }
-
-
-
-
-
+finally { $rootHash.Dispose() }
+$mutex = [Threading.Mutex]::new($false, "Local\DesktopLayoutSwitcher-$mutexId")
+$acquired = $false
+try {
+    try { $acquired = $mutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $acquired = $true }
+    if (-not $acquired) { throw '此配置目录已有一个桌面布局工具正在运行，请先关闭另一个窗口。' }
+    Initialize-LayoutStorage
+    switch ($Action) {
+        'Gui' { Show-LayoutToolWindow }
+        'Save' { Save-LayoutProfile -Name $Profile }
+        'Restore' { Restore-LayoutProfile -Name $Profile -OnlyPositions:$PositionOnly }
+        'Status' { Show-LayoutStatus }
+        'Recover' { Recover-DesktopItems }
+    }
+}
+catch {
+    if ($Action -eq 'Gui') {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '桌面布局切换工具', 'OK', 'Error') | Out-Null
+    }
+    else { [Console]::Error.WriteLine($_.Exception.Message) }
+    exit 1
+}
+finally {
+    if ($acquired) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+}

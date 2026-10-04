@@ -1,0 +1,142 @@
+name: Verify and release Windows application
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-layout-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-build:
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify sources, test synchronization, and build both packages
+        id: build
+        shell: powershell
+        run: ./build/Build-Release.ps1
+      - name: Keep tested release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-${{ github.sha }}
+          path: artifacts/release/*
+          if-no-files-found: error
+
+  powershell-core:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify PowerShell 7 compatibility
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1')
+          foreach ($check in $checks) {
+            & (Join-Path $PSHOME 'pwsh.exe') -STA -NoProfile -NonInteractive -File $check
+            if ($LASTEXITCODE -ne 0) { throw "Verification failed: $check (exit $LASTEXITCODE)." }
+          }
+
+  release:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [windows-build, powershell-core]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release-${{ github.sha }}
+          path: release-assets
+      - name: Verify checksums and publish a missing version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.windows-build.outputs.version }}
+          TARGET_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum --check SHA256SUMS.txt
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          repository = os.environ['GITHUB_REPOSITORY']
+          version = os.environ['RELEASE_VERSION']
+          target = os.environ['TARGET_SHA']
+          tag = 'v' + version
+
+          def gh(*args, optional=False):
+              result = subprocess.run(['gh', *args], capture_output=True, text=True)
+              if result.returncode:
+                  if optional and '(HTTP 404)' in result.stderr:
+                      return None
+                  raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+              return result.stdout
+
+          def api(path, optional=False):
+              value = gh('api', path, optional=optional)
+              return None if value is None else json.loads(value)
+
+          release_path = f'repos/{repository}/releases/tags/{tag}'
+          existing = api(release_path, optional=True)
+          if existing and not existing['draft']:
+              print(f'{tag} has already been published: {existing["html_url"]}')
+              raise SystemExit(0)
+
+          # Resolve existing annotated tags too; never attach an installer to a
+          # tag that names a different source revision.
+          reference = api(f'repos/{repository}/git/ref/tags/{tag}', optional=True)
+          if reference:
+              obj = reference['object']
+              for _ in range(10):
+                  if obj['type'] != 'tag':
+                      break
+                  obj = api(f'repos/{repository}/git/tags/{obj["sha"]}')['object']
+              if obj['type'] != 'commit' or obj['sha'] != target:
+                  raise RuntimeError(f'{tag} already points to a different source revision. Bump VERSION before releasing.')
+          else:
+              # Explicit commit SHA prevents GitHub from using a newer default
+              # branch commit while the Windows build is running.
+              gh('api', '--method', 'POST', f'repos/{repository}/git/refs',
+                 '-f', f'ref=refs/tags/{tag}', '-f', f'sha={target}')
+
+          assets = [f'DesktopLayoutSwitcher-{version}-Setup-x64.exe',
+                    f'DesktopLayoutSwitcher-{version}-Portable-x64.zip', 'SHA256SUMS.txt']
+          for name in assets:
+              if not pathlib.Path(name).is_file():
+                  raise RuntimeError(f'Missing release asset: {name}')
+          notes = pathlib.Path('release-notes.md')
+          notes.write_text(
+              f'DesktopLayoutSwitcher {tag}\n\n'
+              '适用于 64 位 Windows 10 / 11，使用系统自带的 Windows PowerShell 5.1。\n\n'
+              '- `Setup-x64.exe`：当前用户安装，无需管理员权限。\n'
+              '- `Portable-x64.zip`：解压整个目录后运行 `DesktopLayoutSwitcher.exe`。\n'
+              '- `SHA256SUMS.txt`：下载文件校验值。\n\n'
+              '布局、桌面条目存档和恢复备份是本机数据，不包含在安装包中。\n\n'
+              f'源代码版本：`{target}`。\n\n'
+              f'[使用说明](https://github.com/{repository}/blob/{tag}/README.md)\n',
+              encoding='utf-8')
+          if existing:
+              gh('release', 'upload', tag, *assets, '--clobber', '--repo', repository)
+              gh('release', 'edit', tag, '--notes-file', str(notes), '--repo', repository)
+          else:
+              gh('release', 'create', tag, *assets, '--verify-tag', '--draft',
+                 '--target', target, '--title', tag, '--notes-file', str(notes), '--repo', repository)
+          # Make the release public only after all three tested files uploaded.
+          gh('release', 'edit', tag, '--draft=false', '--repo', repository)
+          published = api(release_path)
+          print(f'Published {tag}: {published["html_url"]}')
+          PY

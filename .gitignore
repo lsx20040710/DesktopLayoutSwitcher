@@ -1,0 +1,17 @@
+# Personal desktop profiles, item archives, and generated release artifacts.
+profiles/
+artifacts/
+*.lnk
+*.url
+*.log
+*.tmp
+.vs/
+bin/
+obj/
+
+# Private machine files and editor caches.
+.env
+.env.*
+__pycache__/
+.DS_Store
+Thumbs.db

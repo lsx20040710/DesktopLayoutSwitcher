@@ -287,14 +287,14 @@ begin
   Result := '';
   for Index := 1 to Length(Value) do begin
     Character := Value[Index];
-    case Character of
-      '"': Result := Result + '\"';
-      '\': Result := Result + '\\';
-      #8: Result := Result + '\b';
-      #9: Result := Result + '\t';
-      #10: Result := Result + '\n';
-      #12: Result := Result + '\f';
-      #13: Result := Result + '\r';
+    case Ord(Character) of
+      34: Result := Result + '\"';
+      92: Result := Result + '\\';
+      8: Result := Result + '\b';
+      9: Result := Result + '\t';
+      10: Result := Result + '\n';
+      12: Result := Result + '\f';
+      13: Result := Result + '\r';
     else
       if Ord(Character) < 32 then
         Result := Result + '\u00' + Copy('0123456789abcdef', (Ord(Character) div 16) + 1, 1) +

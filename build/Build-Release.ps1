@@ -21,14 +21,14 @@ foreach ($part in $version.Split('.')) {
 }
 
 $programFiles = @('DesktopLayoutSwitcher.ps1', 'DesktopItems.psm1', 'README.md', 'VERSION')
-foreach ($name in ($programFiles + @('build/Launcher.cs', 'build/installer.iss', 'build/Languages/ChineseSimplified.isl', 'tests/DesktopItems.Tests.ps1', 'tests/Native.Tests.ps1'))) {
+foreach ($name in ($programFiles + @('build/Launcher.cs', 'build/installer.iss', 'build/Languages/ChineseSimplified.isl', 'tests/DesktopItems.Tests.ps1', 'tests/Native.Tests.ps1', 'tests/SharedSettings.Tests.ps1'))) {
     if (-not (Test-Path -LiteralPath (Join-Path $repository $name) -PathType Leaf)) { throw "Required release input is missing: $name" }
 }
 
 # All required checks finish before any distributable is produced. Separate hosts
 # prevent Add-Type definitions and module test state from leaking between checks.
 $powershell = Join-Path $PSHOME 'powershell.exe'
-$checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1')
+$checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1', 'tests/SharedSettings.Tests.ps1')
 $failedChecks = @()
 foreach ($check in $checks) {
     Write-Host "Running $check"

@@ -44,7 +44,7 @@ function Assert-DIId([string]$Id) {
 function Assert-DINotReparse([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "为保护原始数据，暂不处理链接或云占位项目：$Path。请移出此项目或使用完整下载的普通文件副本。"
+        throw "为保护原始数据，暂不处理链接或云占位项目：$Path。可将其桌面顶层文件夹加入始终保留在桌面名单，或使用完整下载的普通文件副本。"
     }
     return $item
 }
@@ -325,7 +325,7 @@ function Repair-DICore($State) {
     return $false
 }
 
-function Invoke-DITransaction($State, $Operations) {
+function Invoke-DITransaction($State, $Operations, $SharedSet = $null) {
     if (@($Operations).Count -eq 0) { return }
     $transactionId = [guid]::NewGuid().ToString('N')
     $index = 0
@@ -365,6 +365,9 @@ function Invoke-DITransaction($State, $Operations) {
             Write-DIJson $journalPath $journal
         }
         foreach ($record in @($State.Catalog.Items)) {
+            # Shared records can predate the exclusion list. Keep their vault copies and
+            # metadata untouched, and never open the shared desktop item for identity.
+            if ($null -ne $SharedSet -and $SharedSet.Contains($record.Name)) { continue }
             $desktopItemPath = Join-Path $State.DesktopPath $record.Name
             $vaultItemPath = Get-DIVaultPath $State $record.Id
             if (Test-Path -LiteralPath $vaultItemPath) { $record.Identity = Get-DIIdentity (Get-Item -LiteralPath $vaultItemPath -Force) }
@@ -392,19 +395,33 @@ function Restore-DICore($State, $Snapshot, $SharedSet, [bool]$MergeOnly) {
     if ($null -eq $Snapshot -or $Snapshot.Version -ne 2) { throw '只有含 Version=2 桌面集合的场景才能修改桌面项目。' }
     $wantedByName = New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
     $wantedIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $wantedItems = New-Object 'Collections.Generic.List[object]'
+    $preservedShared = 0
     foreach ($wanted in @($Snapshot.Items)) {
-        Assert-DIId $wanted.Id
+        # Older scenes may contain a now-shared folder. Validate the name before
+        # skipping it, without resolving its ID, traversing it or preparing a copy.
         Assert-DIName $wanted.Name
+        if ($SharedSet.Contains($wanted.Name)) { $preservedShared++; continue }
+        Assert-DIId $wanted.Id
         if ($wanted.Kind -notin @('File', 'Directory') -or $wantedByName.ContainsKey($wanted.Name) -or -not $wantedIds.Add($wanted.Id)) { throw '场景包含重复项目名称、身份或无效类型。' }
-        if ($SharedSet.Contains($wanted.Name)) { throw "场景把共享项目标记为独立项目，已暂停：$($wanted.Name)" }
         $wantedByName.Add($wanted.Name, $wanted)
+        [void]$wantedItems.Add($wanted)
     }
     $current = Save-DICore $State $SharedSet
+    # Capture first so an ordinary item renamed back from a shared name updates
+    # its catalog name before deciding which historical IDs remain shared.
+    $sharedIds = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($record in @($State.Catalog.Items)) {
+        if ($SharedSet.Contains($record.Name)) { [void]$sharedIds.Add($record.Id) }
+    }
     $currentByName = New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($item in @($current.Items)) { $currentByName.Add($item.Name, $item) }
     # Resolve every incoming item and conflict before moving anything.
     $incoming = New-Object 'Collections.Generic.List[object]'
-    foreach ($wanted in @($Snapshot.Items)) {
+    foreach ($wanted in $wantedItems) {
+        # A historical scene may use the former name of a currently shared record.
+        # Keep its archived copy and current catalog name untouched.
+        if ($sharedIds.Contains($wanted.Id)) { $preservedShared++; continue }
         $records = @($State.Catalog.Items | Where-Object { $_.Id -eq $wanted.Id })
         if ($records.Count -ne 1 -or $records[0].Kind -ne $wanted.Kind) { throw "场景项目在收纳索引中不存在或类型不符：$($wanted.Name)。请找回原数据目录。" }
         $record = $records[0]
@@ -442,8 +459,8 @@ function Restore-DICore($State, $Snapshot, $SharedSet, [bool]$MergeOnly) {
         }
     }
     foreach ($operation in $incoming) { [void]$operations.Add($operation) }
-    Invoke-DITransaction $State $operations.ToArray()
-    return [pscustomobject]@{Stashed = $stashedCount; Restored = $incoming.Count; VaultRoot = $State.VaultRoot; RecoveryRoot = (Join-Path $State.VaultRoot 'recovery')}
+    Invoke-DITransaction $State $operations.ToArray() $SharedSet
+    return [pscustomobject]@{Stashed = $stashedCount; Restored = $incoming.Count; PreservedShared = $preservedShared; VaultRoot = $State.VaultRoot; RecoveryRoot = (Join-Path $State.VaultRoot 'recovery')}
 }
 
 function Save-DesktopItemsSnapshot {

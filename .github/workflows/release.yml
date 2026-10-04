@@ -43,7 +43,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1')
+          $checks = @('build/Verify-Sources.ps1', 'tests/Native.Tests.ps1', 'tests/DesktopItems.Tests.ps1', 'tests/SharedSettings.Tests.ps1')
           $failedChecks = @()
           foreach ($check in $checks) {
             Write-Host "Running $check"
@@ -136,6 +136,7 @@ jobs:
               '- `Setup-x64.exe`：当前用户安装，无需管理员权限。\n'
               '- `Portable-x64.zip`：解压整个目录后运行 `DesktopLayoutSwitcher.exe`。\n'
               '- `SHA256SUMS.txt`：下载文件校验值。\n\n'
+              '默认将桌面 Apps 目录设为所有场景共有，可在界面中编辑共有项目名单。共有项目不递归备份、不收纳、不补齐，含 pnpm 联接的项目目录可以留在桌面。\n\n'
               '布局、桌面条目存档和恢复备份是本机数据，不包含在安装包中。\n\n'
               f'源代码版本：`{target}`。\n\n'
               f'[使用说明](https://github.com/{repository}/blob/{tag}/README.md)\n',

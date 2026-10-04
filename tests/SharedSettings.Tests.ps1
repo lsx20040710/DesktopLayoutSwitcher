@@ -1,10 +1,13 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'DesktopLayoutSwitcher.ps1')
+    [string]$ScriptPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
+    $ScriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'DesktopLayoutSwitcher.ps1'
+}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'

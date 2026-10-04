@@ -21,7 +21,7 @@ foreach ($part in $version.Split('.')) {
 }
 
 $programFiles = @('DesktopLayoutSwitcher.ps1', 'DesktopItems.psm1', 'README.md', 'VERSION')
-foreach ($name in ($programFiles + @('build/Launcher.cs', 'build/installer.iss', 'tests/DesktopItems.Tests.ps1', 'tests/Native.Tests.ps1'))) {
+foreach ($name in ($programFiles + @('build/Launcher.cs', 'build/installer.iss', 'build/Languages/ChineseSimplified.isl', 'tests/DesktopItems.Tests.ps1', 'tests/Native.Tests.ps1'))) {
     if (-not (Test-Path -LiteralPath (Join-Path $repository $name) -PathType Leaf)) { throw "Required release input is missing: $name" }
 }
 

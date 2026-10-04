@@ -25,6 +25,9 @@ jobs:
         id: build
         shell: powershell
         run: ./build/Build-Release.ps1
+      - name: Test installation and uninstallation with preserved user data
+        shell: powershell
+        run: ./build/Test-Installer.ps1 -InstallerPath "artifacts/release/DesktopLayoutSwitcher-${{ steps.build.outputs.version }}-Setup-x64.exe"
       - name: Keep tested release artifacts
         uses: actions/upload-artifact@v4
         with:

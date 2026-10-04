@@ -7,6 +7,7 @@ Import-Module (Join-Path (Split-Path $PSScriptRoot -Parent) 'DesktopItems.psm1')
 $module = Get-Module DesktopItems
 $script:checks = 0
 $root = Join-Path ([IO.Path]::GetTempPath()) ('DesktopItems-tests-' + [guid]::NewGuid().ToString('N'))
+$crossRoot = $null
 [IO.Directory]::CreateDirectory($root) | Out-Null
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -214,10 +215,56 @@ try {
         Assert-Equal 'outside must remain untouched' (Read-Text (Join-Path $outside 'outside.txt')) '链接目标未被移动或修改'
         # Remove just the junction, never recursively remove its target.
         [IO.Directory]::Delete($junction)
+
+        # GitHub's Windows runner checks out on D: while Temp is on C:. Exercise
+        # the actual cross-volume backup path without touching a real user desktop.
+        $repositoryRoot = Split-Path $PSScriptRoot -Parent
+        $repositoryVolume = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($repositoryRoot))
+        $temporaryVolume = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($root))
+        if (-not $repositoryVolume.Equals($temporaryVolume, [StringComparison]::OrdinalIgnoreCase)) {
+            $crossRoot = Join-Path (Join-Path $repositoryRoot 'artifacts') ('cross-volume-' + [guid]::NewGuid().ToString('N'))
+            $crossDesktop = Join-Path $crossRoot 'Desktop'
+            $crossData = Join-Path $root 'cross-volume-data'
+            [IO.Directory]::CreateDirectory($crossDesktop) | Out-Null
+            $crossCommon = Join-Path $crossDesktop 'common.txt'
+            $crossExtra = Join-Path $crossDesktop 'large-screen.lnk'
+            $crossFolder = Join-Path $crossDesktop 'Research'
+            Write-Text $crossCommon 'shared cross-volume document'
+            $crossSmall = Save-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData
+            Write-Text $crossExtra 'cross-volume shortcut bytes'
+            [IO.Directory]::CreateDirectory((Join-Path $crossFolder 'Empty')) | Out-Null
+            Write-Text (Join-Path $crossFolder 'result.txt') 'cross-volume folder content'
+            $crossBig = Save-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData
+            $crossResult = Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossSmall
+            Assert-Equal 2 $crossResult.Stashed '跨盘桌面收纳文件与目录'
+            Assert-Equal $repositoryVolume ([IO.Path]::GetPathRoot($crossResult.VaultRoot)) '跨盘收纳库与桌面处于同一盘'
+            Assert-True (-not $crossResult.VaultRoot.StartsWith($crossData + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) '跨盘收纳库不放在数据目录盘'
+            $hiddenSibling = [IO.Path]::GetDirectoryName($crossResult.VaultRoot)
+            Assert-Equal '.DesktopLayoutSwitcher-vault' ([IO.Path]::GetFileName($hiddenSibling)) '跨盘收纳库使用独立 sibling'
+            Assert-True (([IO.File]::GetAttributes($hiddenSibling) -band [IO.FileAttributes]::Hidden) -ne 0) '跨盘 sibling 设置为隐藏目录'
+            Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossBig | Out-Null
+            Assert-Equal 'cross-volume shortcut bytes' (Read-Text $crossExtra) '同卷移动往返保持文件完整'
+            Assert-Equal 'cross-volume folder content' (Read-Text (Join-Path $crossFolder 'result.txt')) '同卷移动往返保持目录完整'
+            Assert-True (Test-Path -LiteralPath (Join-Path $crossFolder 'Empty')) '跨盘备份和移动保留空目录'
+            Write-Text (Join-Path $crossFolder 'result.txt') 'latest cross-volume folder edit'
+            [IO.File]::Delete($crossExtra)
+            Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossSmall | Out-Null
+            Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossBig | Out-Null
+            Assert-Equal 'cross-volume shortcut bytes' (Read-Text $crossExtra) '从另一盘备份复制到同卷准备目录后补齐缺失文件'
+            Assert-Equal 'latest cross-volume folder edit' (Read-Text (Join-Path $crossFolder 'result.txt')) '跨盘数据目录保留目录最新内容'
+            $crossRestored = Save-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData
+            Assert-Equal (@($crossBig.Items | Where-Object Name -eq 'large-screen.lnk')[0].Id) (@($crossRestored.Items | Where-Object Name -eq 'large-screen.lnk')[0].Id) '跨盘备份补齐后逻辑 ID 稳定'
+            Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossSmall | Out-Null
+            Restore-DesktopItemsSnapshot -DesktopPath $crossDesktop -DataRoot $crossData -Snapshot $crossBig | Out-Null
+            Assert-Equal 'cross-volume shortcut bytes' (Read-Text $crossExtra) '跨盘备份补齐后再次往返成功'
+        } else {
+            Write-Host 'SKIP: cross-volume fixture needs different repository and Temp volumes.'
+        }
     }
 
     Write-Host "PASS: $script:checks checks; mock desktop only, no real desktop touched."
 } finally {
     # The test area contains only fixtures. Real user data is never used by these tests.
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    if ($null -ne $crossRoot -and (Test-Path -LiteralPath $crossRoot)) { Remove-Item -LiteralPath $crossRoot -Recurse -Force }
 }

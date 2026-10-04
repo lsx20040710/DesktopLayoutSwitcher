@@ -80,4 +80,4 @@
 
 Windows 上使用 `build/Build-Release.ps1` 运行检查和生成安装包，需要 Inno Setup 6。日常使用不需要构建工具。
 
-GitHub Actions 在 Windows 上解析 PowerShell 源码、编译原生辅助 C# 和启动器，运行临时桌面目录的项目切换与事务测试，成功后生成安装包、便携 ZIP 和校验文件。`main` 中 `VERSION` 指定尚未发布的版本时，工作流创建对应标签并发布 Release。真实 Explorer 桌面、不同 DPI 和显示器的恢复效果仍需在 Windows 实机上验证。
+GitHub Actions 在 Windows 上解析 PowerShell 源码、编译原生辅助 C# 和启动器，运行临时桌面目录的项目切换、跨盘收纳与事务测试，再验证静默安装、卸载和用户数据保留，成功后生成安装包、便携 ZIP 和校验文件。`main` 中 `VERSION` 指定尚未发布的版本时，工作流创建对应标签并发布 Release。真实 Explorer 桌面、不同 DPI 和显示器的恢复效果仍需在 Windows 实机上验证。
